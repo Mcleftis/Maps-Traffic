@@ -99,6 +99,14 @@
     }
     #navStop { background: #fce8e6 !important; color: #c5221f; font-weight: 700; }
 
+    #recenterBtn {
+      display: none; position: absolute; right: 12px; bottom: 78px; z-index: 1600;
+      width: 50px; height: 50px; border-radius: 50%; border: none;
+      background: #1a73e8; color: #fff; font-size: 24px; cursor: pointer;
+      box-shadow: 0 3px 10px rgba(0,0,0,.4);
+      align-items: center; justify-content: center;
+    }
+
     .me-arrow {
       width: 0; height: 0; border-left: 11px solid transparent;
       border-right: 11px solid transparent; border-bottom: 26px solid #1a73e8;
@@ -149,9 +157,11 @@
       </div>
       <div id="navBottom">
         <span id="navStats">—</span>
+        <button id="navOverview" title="Επισκόπηση διαδρομής">🗺️</button>
         <button id="navMute" title="Φωνητικές οδηγίες">🔊</button>
         <button id="navStop" title="Τερματισμός">✕</button>
       </div>
+      <button id="recenterBtn" title="Επανακέντρο">◎</button>
     </div>
   </div>
 
@@ -192,6 +202,7 @@
     let routeLines = [];                 // [{line, route}]
     let activeIdx = 0;
     let mode = "car";
+    let followMode = true, programmaticMove = false;
 
     const $ = id => document.getElementById(id);
     const resultEl = $("result"), stepsEl = $("steps"), stepsToggle = $("stepsToggle");
@@ -488,11 +499,35 @@
     // ΖΩΝΤΑΝΗ ΠΛΟΗΓΗΣΗ
     // ====================================================================
     const nav = {
-      active: false, watchId: null, muted: false,
+      active: false, watchId: null, muted: false, firstFix: false,
       pts: [], cum: [], mans: [], total: 0, duration: 0,
       lastPos: null, offCount: 0, recalcing: false,
       announced: {},                     // ανά ελιγμό: 1=προαναγγέλθηκε, 2=τελική
     };
+
+    // ---- Follow mode: ο χάρτης ακολουθεί, αλλά ξεκλειδώνει αν ο χρήστης
+    //      μετακινήσει/ζουμάρει μόνος του (όπως στο Google Maps) ----------
+    function setFollow(on) {
+      followMode = on;
+      $("recenterBtn").style.display = on ? "none" : "flex";
+    }
+    function recenterMap(p, zoom) {
+      programmaticMove = true;           // να μη μετρήσει ως ενέργεια χρήστη
+      map.setView(p, zoom != null ? zoom : map.getZoom(), { animate: true });
+    }
+    map.on("moveend", () => { programmaticMove = false; });
+    map.on("dragstart", () => { if (nav.active) setFollow(false); });
+    map.on("zoomstart", () => { if (nav.active && !programmaticMove) setFollow(false); });
+    $("recenterBtn").addEventListener("click", () => {
+      setFollow(true);
+      if (nav.lastPos) recenterMap(nav.lastPos, 16);
+    });
+    $("navOverview").addEventListener("click", () => {
+      if (!routeLines.length) return;
+      setFollow(false);                  // δείξε όλη τη διαδρομή, μείνε ελεύθερος
+      programmaticMove = true;
+      map.fitBounds(routeLines[0].line.getBounds(), { padding: [50, 50] });
+    });
 
     const toRad = d => d * Math.PI / 180;
     function havDist(a, b) {             // [lat,lon] ζεύγη → μέτρα
@@ -590,6 +625,8 @@
 
       nav.active = true;
       nav.lastPos = null;
+      nav.firstFix = true;
+      setFollow(true);
       $("panel").style.display = "none";
       $("navBanner").style.display = "flex";
       $("navBottom").style.display = "flex";
@@ -609,16 +646,22 @@
       if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
       nav.watchId = null;
       if (window.speechSynthesis) speechSynthesis.cancel();
+      setFollow(true);                   // κρύψε το κουμπί επανακέντρου
       $("panel").style.display = "flex";
       $("navBanner").style.display = "none";
       $("navBottom").style.display = "none";
-      if (routeLines.length) map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
+      if (routeLines.length) {
+        programmaticMove = true;
+        map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
+      }
     }
 
     // ---- Κάθε νέο στίγμα GPS --------------------------------------------
     function onNavPosition(pos) {
       if (!nav.active) return;
       const p = [pos.coords.latitude, pos.coords.longitude];
+      const spdKmh = (pos.coords.speed != null && !isNaN(pos.coords.speed) && pos.coords.speed >= 0)
+        ? Math.round(pos.coords.speed * 3.6) : null;
 
       // Δείκτης θέσης με βέλος κατεύθυνσης.
       let heading = pos.coords.heading;
@@ -638,7 +681,14 @@
         const arrow = el && el.querySelector(".me-arrow");
         if (arrow) arrow.style.transform = `rotate(${heading}deg)`;
       }
-      map.setView(p, Math.max(map.getZoom(), 16), { animate: true });
+      // Κεντράρισμα ΜΟΝΟ όταν είμαστε σε follow mode — αλλιώς ο χρήστης
+      // μπορεί ελεύθερα να κάνει zoom out / μετακίνηση και να δει την περιοχή.
+      if (nav.firstFix) {
+        nav.firstFix = false;
+        recenterMap(p, 16);
+      } else if (followMode) {
+        recenterMap(p);                  // κρατά το τρέχον ζουμ του χρήστη
+      }
       nav.lastPos = p;
 
       const snap = snapToRoute(p);
@@ -701,7 +751,8 @@
       const eta = new Date(Date.now() + remainSec * 1000);
       const etaStr = eta.toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
       $("navStats").innerHTML =
-        `<strong>${fmtDist(remaining)}</strong> · ${fmtDur(remainSec)} · άφιξη ${etaStr}`;
+        `<strong>${fmtDist(remaining)}</strong> · ${fmtDur(remainSec)} · άφιξη ${etaStr}` +
+        (spdKmh != null ? ` · ${spdKmh} km/h` : "");
     }
   </script>
 </body>

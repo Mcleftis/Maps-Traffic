@@ -198,7 +198,8 @@
     const TRAFFIC_KEY = "YOUR_TOMTOM_KEY";
 
     // ---- Χάρτης + layers -----------------------------------------------
-    const map = L.map("map", { zoomControl: true }).setView([38.0, 23.7], 7);
+    // preferCanvas: σχεδίαση διαδρομής/δεικτών σε canvas (πιο γρήγορο render).
+    const map = L.map("map", { zoomControl: true, preferCanvas: true }).setView([38.0, 23.7], 7);
     const osmLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -316,11 +317,16 @@
     attachAutocomplete("destination", "destSug", p => { dest = p; if (p) placeMarker("B", p); });
 
     // ---- Geocoding fallback / reverse -----------------------------------
+    const geoCache = {};                  // cache: ίδια διεύθυνση → όχι ξανά δίκτυο
     async function geocode(query) {
+      const key = query.trim().toLowerCase();
+      if (geoCache[key]) return geoCache[key];
       const url = `${NOMINATIM}/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
       const results = await (await fetch(url, { headers: { "Accept-Language": "el,en" } })).json();
       if (!results.length) throw new Error(`Δεν βρέθηκε: «${query}»`);
-      return { lat: +results[0].lat, lon: +results[0].lon };
+      const r = { lat: +results[0].lat, lon: +results[0].lon };
+      geoCache[key] = r;
+      return r;
     }
     async function reverseName(p) {
       try {
@@ -567,7 +573,7 @@
     const nav = {
       active: false, watchId: null, muted: false, firstFix: false,
       pts: [], cum: [], mans: [], total: 0, duration: 0,
-      lastPos: null, offCount: 0, recalcing: false,
+      lastPos: null, offCount: 0, recalcing: false, snapIdx: 0,
       announced: {},                     // ανά ελιγμό: 1=προαναγγέλθηκε, 2=τελική
     };
 
@@ -629,6 +635,7 @@
       });
       nav.announced = {};
       nav.offCount = 0;
+      nav.snapIdx = 0;                    // πλήρης σάρωση στο πρώτο στίγμα
     }
 
     // Σημείο πάνω στη διαδρομή σε δεδομένη απόσταση κατά μήκος (μέτρα).
@@ -655,23 +662,43 @@
     }
 
     // Προβολή θέσης πάνω στη διαδρομή: απόσταση κατά μήκος + απόκλιση.
+    // Βελτιστοποίηση: αντί να σαρώνουμε ΟΛΑ τα σημεία κάθε δευτερόλεπτο,
+    // ψάχνουμε μόνο σε ένα παράθυρο γύρω από την τελευταία θέση (nav.snapIdx).
+    // Πλήρης σάρωση μόνο στο πρώτο στίγμα ή αν χαθήκαμε — O(window) αντί O(N).
     function snapToRoute(p) {            // p=[lat,lon]
-      let best = { off: Infinity, along: 0 };
       const cosLat = Math.cos(toRad(p[0]));
       const mx = lon => lon * cosLat * 111320, my = lat => lat * 110540;
       const px = mx(p[1]), py = my(p[0]);
-      for (let i = 1; i < nav.pts.length; i++) {
-        const ax = mx(nav.pts[i - 1][1]), ay = my(nav.pts[i - 1][0]);
-        const bx = mx(nav.pts[i][1]), by = my(nav.pts[i][0]);
-        const vx = bx - ax, vy = by - ay;
-        const len2 = vx * vx + vy * vy;
-        const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
-        const dx = px - (ax + t * vx), dy = py - (ay + t * vy);
-        const off = Math.sqrt(dx * dx + dy * dy);
-        if (off < best.off) {
-          best = { off, along: nav.cum[i - 1] + t * (nav.cum[i] - nav.cum[i - 1]) };
+      const n = nav.pts.length;
+
+      function scan(lo, hi) {
+        let best = { off: Infinity, along: 0, idx: lo };
+        for (let i = lo; i < hi; i++) {
+          const ax = mx(nav.pts[i - 1][1]), ay = my(nav.pts[i - 1][0]);
+          const bx = mx(nav.pts[i][1]), by = my(nav.pts[i][0]);
+          const vx = bx - ax, vy = by - ay;
+          const len2 = vx * vx + vy * vy;
+          const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
+          const dx = px - (ax + t * vx), dy = py - (ay + t * vy);
+          const off = Math.sqrt(dx * dx + dy * dy);
+          if (off < best.off) {
+            best = { off, along: nav.cum[i - 1] + t * (nav.cum[i] - nav.cum[i - 1]), idx: i };
+          }
         }
+        return best;
       }
+
+      let best;
+      if (nav.snapIdx > 0) {
+        const lo = Math.max(1, nav.snapIdx - 3);
+        const hi = Math.min(n, nav.snapIdx + 150);
+        best = scan(lo, hi);
+        // Μακριά ή στην άκρη του παραθύρου → πλήρης σάρωση (ασφάλεια/σωστότητα).
+        if (best.off > 60 || best.idx >= hi - 1) best = scan(1, n);
+      } else {
+        best = scan(1, n);
+      }
+      nav.snapIdx = best.idx;
       return best;
     }
 

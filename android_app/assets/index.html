@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Διαδρομή χωρίς κίνηση — OSM</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #app { display: flex; flex-direction: column; height: 100%; }
+    #panel {
+      padding: 12px; background: #fff; z-index: 1000;
+      box-shadow: 0 2px 6px rgba(0,0,0,.25);
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    #panel input {
+      width: 100%; padding: 10px 12px; font-size: 16px;
+      border: 1px solid #ccc; border-radius: 6px;
+    }
+    #panel button {
+      padding: 12px; font-size: 16px; font-weight: 600; color: #fff;
+      background: #1a73e8; border: none; border-radius: 6px; cursor: pointer;
+    }
+    #panel button:disabled { background: #9cbcf0; }
+    #result { font-size: 14px; color: #333; min-height: 18px; }
+    #result .badge {
+      display: inline-block; background: #e6f4ea; color: #137333;
+      border-radius: 4px; padding: 2px 6px; font-size: 12px;
+      font-weight: 600; margin-left: 6px;
+    }
+    #result .error { color: #c5221f; }
+    #map { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="panel">
+      <input id="origin" type="text" placeholder="Αφετηρία (π.χ. Σύνταγμα, Αθήνα)">
+      <input id="destination" type="text" placeholder="Προορισμός (π.χ. Θεσσαλονίκη)">
+      <button id="go">Υπολογισμός διαδρομής (χωρίς κίνηση)</button>
+      <div id="result"></div>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // =====================================================================
+    // Έκδοση χωρίς API key: OpenStreetMap χάρτης + OSRM δρομολόγηση.
+    //
+    // Ο OSRM υπολογίζει διαδρομές ΜΟΝΟ από στατικά δεδομένα δρόμων του
+    // OpenStreetMap — δεν έχει καν πρόσβαση σε real-time κίνηση, οπότε
+    // η απαίτηση "strictly no traffic" ικανοποιείται εκ κατασκευής.
+    //
+    // Ο δημόσιος server (router.project-osrm.org) είναι demo για ελαφριά
+    // χρήση. Για παραγωγή, στήσε δικό σου OSRM ή χρησιμοποίησε την έκδοση
+    // Google (index.html) με routingPreference: TRAFFIC_UNAWARE.
+    // =====================================================================
+    const OSRM = "https://router.project-osrm.org/route/v1/driving";
+    const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+
+    const map = L.map("map").setView([38.0, 23.7], 7); // Ελλάδα
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map);
+
+    let routeLine = null, markerA = null, markerB = null;
+
+    async function geocode(query) {
+      const url = `${NOMINATIM}?format=json&limit=1&q=${encodeURIComponent(query)}`;
+      const resp = await fetch(url, { headers: { "Accept-Language": "el,en" } });
+      if (!resp.ok) throw new Error(`Geocoding: HTTP ${resp.status}`);
+      const results = await resp.json();
+      if (!results.length) throw new Error(`Δεν βρέθηκε: «${query}»`);
+      return { lat: +results[0].lat, lon: +results[0].lon, name: results[0].display_name };
+    }
+
+    async function calculateRoute() {
+      const btn = document.getElementById("go");
+      const resultEl = document.getElementById("result");
+      const from = document.getElementById("origin").value.trim();
+      const to = document.getElementById("destination").value.trim();
+      if (!from || !to) {
+        resultEl.innerHTML = '<span class="error">Συμπλήρωσε αφετηρία και προορισμό.</span>';
+        return;
+      }
+      btn.disabled = true;
+      resultEl.textContent = "Υπολογισμός…";
+      try {
+        const a = await geocode(from);
+        const b = await geocode(to);
+
+        // Χωρίς καμία παράμετρο κίνησης — μόνο στατική δρομολόγηση.
+        const url = `${OSRM}/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Routing: HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.code !== "Ok" || !data.routes.length)
+          throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");
+
+        drawRoute(data.routes[0], a, b, resultEl);
+      } catch (e) {
+        resultEl.innerHTML = `<span class="error">Σφάλμα: ${e.message}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function drawRoute(route, a, b, resultEl) {
+      if (routeLine) routeLine.remove();
+      if (markerA) markerA.remove();
+      if (markerB) markerB.remove();
+
+      // Το GeoJSON έχει [lon, lat] — το Leaflet θέλει [lat, lon].
+      const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      routeLine = L.polyline(latlngs, { color: "#1a73e8", weight: 5, opacity: 0.9 }).addTo(map);
+      markerA = L.marker([a.lat, a.lon]).addTo(map).bindPopup("Αφετηρία");
+      markerB = L.marker([b.lat, b.lon]).addTo(map).bindPopup("Προορισμός");
+      map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
+
+      const km = (route.distance / 1000).toFixed(1);
+      const totalMin = Math.round(route.duration / 60);
+      const h = Math.floor(totalMin / 60), m = totalMin % 60;
+      const dur = h > 0 ? `${h} ώρ ${m} λεπ` : `${m} λεπ`;
+      resultEl.innerHTML =
+        `<strong>${km} km</strong> · ${dur}` +
+        `<span class="badge">χωρίς δεδομένα κίνησης</span>`;
+    }
+
+    document.getElementById("go").addEventListener("click", calculateRoute);
+    document.getElementById("destination").addEventListener("keydown",
+      e => { if (e.key === "Enter") calculateRoute(); });
+  </script>
+</body>
+</html>

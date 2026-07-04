@@ -631,6 +631,29 @@
       nav.offCount = 0;
     }
 
+    // Σημείο πάνω στη διαδρομή σε δεδομένη απόσταση κατά μήκος (μέτρα).
+    function pointAtAlong(along) {
+      if (along <= 0) return nav.pts[0];
+      for (let i = 1; i < nav.cum.length; i++) {
+        if (nav.cum[i] >= along) {
+          const seg = nav.cum[i] - nav.cum[i - 1] || 1;
+          const t = (along - nav.cum[i - 1]) / seg;
+          const a = nav.pts[i - 1], b = nav.pts[i];
+          return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+        }
+      }
+      return nav.pts[nav.pts.length - 1];
+    }
+
+    // Σβήνει το ήδη διανυθέν κομμάτι: αφήνει ορατό μόνο ό,τι είναι μπροστά.
+    function trimRouteAhead(along) {
+      let i = 0;
+      while (i < nav.cum.length && nav.cum[i] < along) i++;
+      const ahead = [pointAtAlong(along)];
+      for (; i < nav.pts.length; i++) ahead.push(nav.pts[i]);
+      routeLines[0].line.setLatLngs(ahead);
+    }
+
     // Προβολή θέσης πάνω στη διαδρομή: απόσταση κατά μήκος + απόκλιση.
     function snapToRoute(p) {            // p=[lat,lon]
       let best = { off: Infinity, along: 0 };
@@ -655,13 +678,27 @@
     function speak(text) {
       if (nav.muted) return;
       try {
+        // 1η επιλογή: native Android TextToSpeech στα ελληνικά (μέσω γέφυρας).
+        if (window.AndroidTTS && typeof AndroidTTS.speak === "function") {
+          AndroidTTS.speak(text);
+          return;
+        }
+        // 2η επιλογή (browser): SpeechSynthesis με ρητή ελληνική φωνή.
         if (!window.speechSynthesis) return;
         const u = new SpeechSynthesisUtterance(text);
         u.lang = "el-GR";
+        const gv = (speechSynthesis.getVoices() || []).find(
+          v => /el[-_]?gr/i.test(v.lang) || /greek|ελλ/i.test(v.name));
+        if (gv) u.voice = gv;
         u.rate = 1.05;
         speechSynthesis.cancel();
         speechSynthesis.speak(u);
       } catch (e) { /* χωρίς φωνή — μόνο οπτικά */ }
+    }
+    // Προθέρμανση λίστας φωνών του browser (φορτώνει ασύγχρονα).
+    if (window.speechSynthesis) {
+      speechSynthesis.getVoices();
+      speechSynthesis.onvoiceschanged = () => speechSynthesis.getVoices();
     }
     function spokenDist(m) {
       if (m >= 950) return `${(Math.round(m / 100) / 10).toString().replace(".", " κόμμα ")} χιλιόμετρα`;
@@ -774,6 +811,9 @@
       } else {
         nav.offCount = 0;
       }
+
+      // Σβήσε το κομμάτι που ήδη διανύθηκε — κράτα ορατό μόνο το μπροστά.
+      if (!nav.recalcing && routeLines.length) trimRouteAhead(snap.along);
 
       // Άφιξη;
       const remaining = Math.max(0, nav.total - snap.along);

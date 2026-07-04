@@ -33,13 +33,13 @@ echo "==> 5/6 zipalign"
 zipalign -f 4 "$OUT/app.unsigned.apk" "$OUT/app.aligned.apk"
 
 echo "==> 6/6 sign"
-if [ ! -f "$OUT/debug.keystore" ]; then
-    keytool -genkeypair -keystore "$OUT/debug.keystore" \
+if [ ! -f "./debug.keystore" ]; then
+    keytool -genkeypair -keystore "./debug.keystore" \
         -storepass android -keypass android -alias appkey \
         -keyalg RSA -keysize 2048 -validity 10000 \
         -dname "CN=Route NoTraffic, O=Dev, C=GR"
 fi
-apksigner sign --ks "$OUT/debug.keystore" \
+apksigner sign --ks "./debug.keystore" \
     --ks-pass pass:android --key-pass pass:android \
     --out "$OUT/route-no-traffic.apk" "$OUT/app.aligned.apk"
 apksigner verify --verbose "$OUT/route-no-traffic.apk" | head -5

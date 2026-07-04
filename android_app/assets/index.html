@@ -3,135 +3,433 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Διαδρομή χωρίς κίνηση — OSM</title>
+  <title>Διαδρομή χωρίς κίνηση</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
     #app { display: flex; flex-direction: column; height: 100%; }
+
     #panel {
-      padding: 12px; background: #fff; z-index: 1000;
+      padding: 10px 12px; background: #fff; z-index: 1100;
       box-shadow: 0 2px 6px rgba(0,0,0,.25);
       display: flex; flex-direction: column; gap: 8px;
     }
-    #panel input {
+    .inputwrap { position: relative; }
+    .inputwrap input {
       width: 100%; padding: 10px 12px; font-size: 16px;
       border: 1px solid #ccc; border-radius: 6px;
     }
-    #panel button {
-      padding: 12px; font-size: 16px; font-weight: 600; color: #fff;
-      background: #1a73e8; border: none; border-radius: 6px; cursor: pointer;
+    .suggestions {
+      position: absolute; top: 100%; left: 0; right: 0; z-index: 1200;
+      background: #fff; border: 1px solid #ddd; border-top: none;
+      border-radius: 0 0 6px 6px; max-height: 200px; overflow-y: auto;
+      display: none;
     }
-    #panel button:disabled { background: #9cbcf0; }
-    #result { font-size: 14px; color: #333; min-height: 18px; }
+    .suggestions div {
+      padding: 9px 12px; font-size: 14px; cursor: pointer;
+      border-bottom: 1px solid #f0f0f0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .suggestions div:active, .suggestions div:hover { background: #eef3fd; }
+
+    #modes { display: flex; gap: 6px; }
+    #modes button {
+      flex: 1; padding: 8px; font-size: 18px; border-radius: 6px;
+      border: 1px solid #ccc; background: #fff; cursor: pointer;
+    }
+    #modes button.active { background: #1a73e8; border-color: #1a73e8; }
+
+    #actions { display: flex; gap: 6px; }
+    #actions button {
+      padding: 11px; font-size: 15px; font-weight: 600; border: none;
+      border-radius: 6px; cursor: pointer; background: #eee; color: #333;
+    }
+    #go { flex: 1; background: #1a73e8 !important; color: #fff !important; }
+    #go:disabled { background: #9cbcf0 !important; }
+
+    #result { font-size: 14px; color: #333; min-height: 0; }
     #result .badge {
       display: inline-block; background: #e6f4ea; color: #137333;
       border-radius: 4px; padding: 2px 6px; font-size: 12px;
       font-weight: 600; margin-left: 6px;
     }
+    #result .alt { color: #666; font-size: 13px; }
     #result .error { color: #c5221f; }
+
+    #stepsToggle {
+      display: none; font-size: 13px; font-weight: 600; color: #1a73e8;
+      background: none; border: none; text-align: left; cursor: pointer; padding: 0;
+    }
+    #steps {
+      display: none; max-height: 32vh; overflow-y: auto;
+      border-top: 1px solid #eee;
+    }
+    #steps .step {
+      display: flex; gap: 10px; align-items: baseline;
+      padding: 7px 4px; font-size: 14px; border-bottom: 1px solid #f3f3f3;
+    }
+    #steps .ico { font-size: 17px; width: 22px; text-align: center; flex: none; }
+    #steps .dist { margin-left: auto; color: #888; font-size: 12px; flex: none; }
+
     #map { flex: 1; }
+    .leaflet-popup-content button {
+      display: block; width: 100%; margin: 4px 0; padding: 8px 10px;
+      border: none; border-radius: 5px; background: #1a73e8; color: #fff;
+      font-size: 14px; cursor: pointer;
+    }
   </style>
 </head>
 <body>
   <div id="app">
     <div id="panel">
-      <input id="origin" type="text" placeholder="Αφετηρία (π.χ. Σύνταγμα, Αθήνα)">
-      <input id="destination" type="text" placeholder="Προορισμός (π.χ. Θεσσαλονίκη)">
-      <button id="go">Υπολογισμός διαδρομής (χωρίς κίνηση)</button>
+      <div class="inputwrap">
+        <input id="origin" type="text" placeholder="Αφετηρία" autocomplete="off">
+        <div class="suggestions" id="originSug"></div>
+      </div>
+      <div class="inputwrap">
+        <input id="destination" type="text" placeholder="Προορισμός" autocomplete="off">
+        <div class="suggestions" id="destSug"></div>
+      </div>
+      <div id="modes">
+        <button data-mode="car" class="active" title="Αυτοκίνητο">🚗</button>
+        <button data-mode="bike" title="Ποδήλατο">🚲</button>
+        <button data-mode="foot" title="Περπάτημα">🚶</button>
+      </div>
+      <div id="actions">
+        <button id="go">Διαδρομή</button>
+        <button id="swap" title="Αντιστροφή">⇅</button>
+        <button id="locate" title="Η θέση μου">📍</button>
+        <button id="clear" title="Καθαρισμός">✕</button>
+      </div>
       <div id="result"></div>
+      <button id="stepsToggle">Οδηγίες βήμα-βήμα ▾</button>
+      <div id="steps"></div>
     </div>
     <div id="map"></div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // =====================================================================
-    // Έκδοση χωρίς API key: OpenStreetMap χάρτης + OSRM δρομολόγηση.
-    //
-    // Ο OSRM υπολογίζει διαδρομές ΜΟΝΟ από στατικά δεδομένα δρόμων του
-    // OpenStreetMap — δεν έχει καν πρόσβαση σε real-time κίνηση, οπότε
-    // η απαίτηση "strictly no traffic" ικανοποιείται εκ κατασκευής.
-    //
-    // Ο δημόσιος server (router.project-osrm.org) είναι demo για ελαφριά
-    // χρήση. Για παραγωγή, στήσε δικό σου OSRM ή χρησιμοποίησε την έκδοση
-    // Google (index.html) με routingPreference: TRAFFIC_UNAWARE.
-    // =====================================================================
-    const OSRM = "https://router.project-osrm.org/route/v1/driving";
-    const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+    // ====================================================================
+    // Διαδρομές ΧΩΡΙΣ real-time κίνηση: OSRM (routing.openstreetmap.de)
+    // δρομολογεί μόνο με στατικά δεδομένα δρόμων του OpenStreetMap.
+    // Geocoding/autocomplete: Photon + Nominatim (δωρεάν, χωρίς κλειδί).
+    // ====================================================================
+    const PROFILES = {
+      car:  "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+      bike: "https://routing.openstreetmap.de/routed-bike/route/v1/driving",
+      foot: "https://routing.openstreetmap.de/routed-foot/route/v1/driving",
+    };
+    const PHOTON = "https://photon.komoot.io/api/";
+    const NOMINATIM = "https://nominatim.openstreetmap.org";
 
-    const map = L.map("map").setView([38.0, 23.7], 7); // Ελλάδα
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // ---- Χάρτης + layers -----------------------------------------------
+    const map = L.map("map", { zoomControl: true }).setView([38.0, 23.7], 7);
+    const osmLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
+    const satLayer = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 19, attribution: "Tiles &copy; Esri",
+    });
+    L.control.layers(
+      { "Χάρτης": osmLayer, "Δορυφόρος": satLayer }, null, { position: "topright" }
+    ).addTo(map);
+    L.control.scale({ metric: true, imperial: false }).addTo(map);
 
-    let routeLine = null, markerA = null, markerB = null;
+    // ---- Κατάσταση -------------------------------------------------------
+    let origin = null, dest = null;      // {lat, lon}
+    let markerA = null, markerB = null, myPosMarker = null;
+    let routeLines = [];                 // [{line, route}]
+    let mode = "car";
 
+    const $ = id => document.getElementById(id);
+    const resultEl = $("result"), stepsEl = $("steps"), stepsToggle = $("stepsToggle");
+
+    // ---- Autocomplete (Photon) ------------------------------------------
+    function attachAutocomplete(inputId, sugId, setPoint) {
+      const input = $(inputId), sug = $(sugId);
+      let timer = null;
+      input.addEventListener("input", () => {
+        setPoint(null);                  // ο χρήστης αλλάζει το κείμενο
+        clearTimeout(timer);
+        const q = input.value.trim();
+        if (q.length < 3) { sug.style.display = "none"; return; }
+        timer = setTimeout(async () => {
+          try {
+            const c = map.getCenter();
+            const url = `${PHOTON}?q=${encodeURIComponent(q)}&limit=5&lat=${c.lat}&lon=${c.lng}`;
+            const results = (await (await fetch(url)).json()).features || [];
+            sug.innerHTML = "";
+            results.forEach(f => {
+              const p = f.properties;
+              const label = [p.name, p.street, p.city || p.county, p.country]
+                .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
+              const div = document.createElement("div");
+              div.textContent = label;
+              div.onclick = () => {
+                input.value = label;
+                sug.style.display = "none";
+                const [lon, lat] = f.geometry.coordinates;
+                setPoint({ lat, lon });
+                maybeRoute();
+              };
+              sug.appendChild(div);
+            });
+            sug.style.display = results.length ? "block" : "none";
+          } catch (e) { sug.style.display = "none"; }
+        }, 300);
+      });
+      input.addEventListener("keydown", e => {
+        if (e.key === "Enter") { sug.style.display = "none"; calculateRoute(); }
+      });
+      document.addEventListener("click", e => {
+        if (!sug.contains(e.target) && e.target !== input) sug.style.display = "none";
+      });
+    }
+    attachAutocomplete("origin", "originSug", p => { origin = p; if (p) placeMarker("A", p); });
+    attachAutocomplete("destination", "destSug", p => { dest = p; if (p) placeMarker("B", p); });
+
+    // ---- Geocoding fallback / reverse -----------------------------------
     async function geocode(query) {
-      const url = `${NOMINATIM}?format=json&limit=1&q=${encodeURIComponent(query)}`;
-      const resp = await fetch(url, { headers: { "Accept-Language": "el,en" } });
-      if (!resp.ok) throw new Error(`Geocoding: HTTP ${resp.status}`);
-      const results = await resp.json();
+      const url = `${NOMINATIM}/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+      const results = await (await fetch(url, { headers: { "Accept-Language": "el,en" } })).json();
       if (!results.length) throw new Error(`Δεν βρέθηκε: «${query}»`);
-      return { lat: +results[0].lat, lon: +results[0].lon, name: results[0].display_name };
+      return { lat: +results[0].lat, lon: +results[0].lon };
+    }
+    async function reverseName(p) {
+      try {
+        const url = `${NOMINATIM}/reverse?format=json&lat=${p.lat}&lon=${p.lon}&zoom=17`;
+        const r = await (await fetch(url, { headers: { "Accept-Language": "el,en" } })).json();
+        return r.display_name ? r.display_name.split(",").slice(0, 3).join(",") : `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
+      } catch (e) { return `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`; }
+    }
+
+    // ---- Δείκτες (συρόμενοι, όπως στο Google Maps) ----------------------
+    function placeMarker(which, p) {
+      const isA = which === "A";
+      let m = isA ? markerA : markerB;
+      if (m) { m.setLatLng([p.lat, p.lon]); return; }
+      m = L.marker([p.lat, p.lon], { draggable: true, title: isA ? "Αφετηρία" : "Προορισμός" }).addTo(map);
+      m.bindTooltip(isA ? "A" : "B", { permanent: true, direction: "top", offset: [-14, -10] });
+      m.on("dragend", async () => {
+        const ll = m.getLatLng();
+        const p2 = { lat: ll.lat, lon: ll.lng };
+        if (isA) origin = p2; else dest = p2;
+        $(isA ? "origin" : "destination").value = await reverseName(p2);
+        maybeRoute();
+      });
+      if (isA) markerA = m; else markerB = m;
+    }
+
+    // ---- Πάτημα στον χάρτη → ορισμός σημείου ----------------------------
+    map.on("click", e => {
+      const { lat, lng } = e.latlng;
+      const html =
+        `<button onclick="setPointHere('A',${lat},${lng})">Αφετηρία εδώ</button>` +
+        `<button onclick="setPointHere('B',${lat},${lng})">Προορισμός εδώ</button>`;
+      L.popup().setLatLng(e.latlng).setContent(html).openOn(map);
+    });
+    window.setPointHere = async (which, lat, lon) => {
+      map.closePopup();
+      const p = { lat, lon };
+      if (which === "A") origin = p; else dest = p;
+      placeMarker(which, p);
+      $(which === "A" ? "origin" : "destination").value = await reverseName(p);
+      maybeRoute();
+    };
+
+    // ---- Η θέση μου ------------------------------------------------------
+    $("locate").addEventListener("click", () => {
+      if (!navigator.geolocation) {
+        resultEl.innerHTML = '<span class="error">Δεν υποστηρίζεται εντοπισμός θέσης.</span>';
+        return;
+      }
+      resultEl.textContent = "Εντοπισμός θέσης…";
+      navigator.geolocation.getCurrentPosition(async pos => {
+        const p = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        origin = p;
+        placeMarker("A", p);
+        if (myPosMarker) myPosMarker.remove();
+        myPosMarker = L.circleMarker([p.lat, p.lon], {
+          radius: 8, color: "#fff", weight: 2, fillColor: "#1a73e8", fillOpacity: 1,
+        }).addTo(map);
+        $("origin").value = "Η θέση μου";
+        map.setView([p.lat, p.lon], Math.max(map.getZoom(), 14));
+        resultEl.textContent = "";
+        maybeRoute();
+      }, err => {
+        resultEl.innerHTML = `<span class="error">Αποτυχία εντοπισμού: ${err.message}</span>`;
+      }, { enableHighAccuracy: true, timeout: 15000 });
+    });
+
+    // ---- Λειτουργίες μετακίνησης ----------------------------------------
+    document.querySelectorAll("#modes button").forEach(b => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll("#modes button").forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        mode = b.dataset.mode;
+        maybeRoute();
+      });
+    });
+
+    // ---- Λοιπά κουμπιά ---------------------------------------------------
+    $("swap").addEventListener("click", () => {
+      [origin, dest] = [dest, origin];
+      const a = $("origin").value; $("origin").value = $("destination").value; $("destination").value = a;
+      if (origin) placeMarker("A", origin);
+      if (dest) placeMarker("B", dest);
+      maybeRoute();
+    });
+    $("clear").addEventListener("click", () => {
+      origin = dest = null;
+      $("origin").value = $("destination").value = "";
+      [markerA, markerB, myPosMarker].forEach(m => m && m.remove());
+      markerA = markerB = myPosMarker = null;
+      clearRoutes();
+      resultEl.textContent = "";
+      stepsEl.style.display = "none"; stepsToggle.style.display = "none";
+    });
+    $("go").addEventListener("click", calculateRoute);
+    stepsToggle.addEventListener("click", () => {
+      const open = stepsEl.style.display === "block";
+      stepsEl.style.display = open ? "none" : "block";
+      stepsToggle.textContent = open ? "Οδηγίες βήμα-βήμα ▾" : "Οδηγίες βήμα-βήμα ▴";
+    });
+
+    // ---- Υπολογισμός διαδρομής ------------------------------------------
+    function maybeRoute() { if (origin && dest) calculateRoute(); }
+
+    function clearRoutes() {
+      routeLines.forEach(r => r.line.remove());
+      routeLines = [];
     }
 
     async function calculateRoute() {
-      const btn = document.getElementById("go");
-      const resultEl = document.getElementById("result");
-      const from = document.getElementById("origin").value.trim();
-      const to = document.getElementById("destination").value.trim();
-      if (!from || !to) {
-        resultEl.innerHTML = '<span class="error">Συμπλήρωσε αφετηρία και προορισμό.</span>';
+      try {
+        if (!origin) {
+          const q = $("origin").value.trim();
+          if (!q) throw new Error("Συμπλήρωσε αφετηρία.");
+          origin = await geocode(q); placeMarker("A", origin);
+        }
+        if (!dest) {
+          const q = $("destination").value.trim();
+          if (!q) throw new Error("Συμπλήρωσε προορισμό.");
+          dest = await geocode(q); placeMarker("B", dest);
+        }
+      } catch (e) {
+        resultEl.innerHTML = `<span class="error">${e.message}</span>`;
         return;
       }
-      btn.disabled = true;
+
+      $("go").disabled = true;
       resultEl.textContent = "Υπολογισμός…";
       try {
-        const a = await geocode(from);
-        const b = await geocode(to);
-
-        // Χωρίς καμία παράμετρο κίνησης — μόνο στατική δρομολόγηση.
-        const url = `${OSRM}/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`Routing: HTTP ${resp.status}`);
-        const data = await resp.json();
+        const url = `${PROFILES[mode]}/${origin.lon},${origin.lat};${dest.lon},${dest.lat}` +
+          `?overview=full&geometries=geojson&alternatives=true&steps=true`;
+        const data = await (await fetch(url)).json();
         if (data.code !== "Ok" || !data.routes.length)
           throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");
-
-        drawRoute(data.routes[0], a, b, resultEl);
+        drawRoutes(data.routes);
       } catch (e) {
         resultEl.innerHTML = `<span class="error">Σφάλμα: ${e.message}</span>`;
       } finally {
-        btn.disabled = false;
+        $("go").disabled = false;
       }
     }
 
-    function drawRoute(route, a, b, resultEl) {
-      if (routeLine) routeLine.remove();
-      if (markerA) markerA.remove();
-      if (markerB) markerB.remove();
-
-      // Το GeoJSON έχει [lon, lat] — το Leaflet θέλει [lat, lon].
-      const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      routeLine = L.polyline(latlngs, { color: "#1a73e8", weight: 5, opacity: 0.9 }).addTo(map);
-      markerA = L.marker([a.lat, a.lon]).addTo(map).bindPopup("Αφετηρία");
-      markerB = L.marker([b.lat, b.lon]).addTo(map).bindPopup("Προορισμός");
-      map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
-
-      const km = (route.distance / 1000).toFixed(1);
-      const totalMin = Math.round(route.duration / 60);
-      const h = Math.floor(totalMin / 60), m = totalMin % 60;
-      const dur = h > 0 ? `${h} ώρ ${m} λεπ` : `${m} λεπ`;
-      resultEl.innerHTML =
-        `<strong>${km} km</strong> · ${dur}` +
-        `<span class="badge">χωρίς δεδομένα κίνησης</span>`;
+    function drawRoutes(routes) {
+      clearRoutes();
+      routes.forEach((route, i) => {
+        const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+        const line = L.polyline(latlngs, i === 0
+          ? { color: "#1a73e8", weight: 6, opacity: 0.95 }
+          : { color: "#9aa0a6", weight: 5, opacity: 0.8, dashArray: "6 8" }
+        ).addTo(map);
+        line.on("click", () => selectRoute(i));
+        routeLines.push({ line, route });
+      });
+      // Η κύρια διαδρομή πάνω από τις εναλλακτικές.
+      routeLines[0].line.bringToFront();
+      map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
+      showRouteInfo(0);
     }
 
-    document.getElementById("go").addEventListener("click", calculateRoute);
-    document.getElementById("destination").addEventListener("keydown",
-      e => { if (e.key === "Enter") calculateRoute(); });
+    function selectRoute(idx) {
+      routeLines.forEach(({ line }, i) => {
+        line.setStyle(i === idx
+          ? { color: "#1a73e8", weight: 6, opacity: 0.95, dashArray: null }
+          : { color: "#9aa0a6", weight: 5, opacity: 0.8, dashArray: "6 8" });
+      });
+      routeLines[idx].line.bringToFront();
+      showRouteInfo(idx);
+    }
+
+    function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m"; }
+    function fmtDur(sec) {
+      const min = Math.round(sec / 60), h = Math.floor(min / 60);
+      return h > 0 ? `${h} ώρ ${min % 60} λεπ` : `${min} λεπ`;
+    }
+
+    function showRouteInfo(idx) {
+      const { route } = routeLines[idx];
+      let html = `<strong>${fmtDist(route.distance)}</strong> · ${fmtDur(route.duration)}` +
+        `<span class="badge">χωρίς δεδομένα κίνησης</span>`;
+      if (routeLines.length > 1) {
+        html += `<div class="alt">${routeLines.length - 1} εναλλακτική/ές — πάτησε πάνω σε γκρι διαδρομή για επιλογή</div>`;
+      }
+      resultEl.innerHTML = html;
+      renderSteps(route);
+    }
+
+    // ---- Οδηγίες βήμα-βήμα στα ελληνικά ---------------------------------
+    const DIR_TEXT = {
+      "uturn": "Κάνε αναστροφή", "sharp left": "Στρίψε κλειστά αριστερά",
+      "left": "Στρίψε αριστερά", "slight left": "Κράτα ελαφρώς αριστερά",
+      "straight": "Συνέχισε ευθεία", "slight right": "Κράτα ελαφρώς δεξιά",
+      "right": "Στρίψε δεξιά", "sharp right": "Στρίψε κλειστά δεξιά",
+    };
+    const DIR_ICON = {
+      "uturn": "↩", "sharp left": "↰", "left": "←", "slight left": "↖",
+      "straight": "↑", "slight right": "↗", "right": "→", "sharp right": "↱",
+    };
+    function stepInfo(step) {
+      const t = step.maneuver.type, m = step.maneuver.modifier || "straight";
+      const road = step.name ? ` στην «${step.name}»` : "";
+      if (t === "depart") return ["●", "Ξεκίνησε" + road];
+      if (t === "arrive") return ["🏁", "Έφτασες στον προορισμό"];
+      if (t === "roundabout" || t === "rotary") {
+        const exit = step.maneuver.exit ? `πάρε την ${step.maneuver.exit}η έξοδο` : "συνέχισε";
+        return ["⟳", `Στον κυκλικό κόμβο ${exit}` + road];
+      }
+      if (t === "merge") return [DIR_ICON[m] || "↑", "Συγχωνεύσου με τη ροή" + road];
+      if (t === "on ramp") return [DIR_ICON[m] || "↗", "Μπες στη ράμπα" + road];
+      if (t === "off ramp") return [DIR_ICON[m] || "↘", "Βγες στην έξοδο" + road];
+      if (t === "fork") return [DIR_ICON[m] || "↑", `Στη διχάλα ${DIR_TEXT[m] ? DIR_TEXT[m].toLowerCase() : "συνέχισε"}` + road];
+      if (t === "end of road") return [DIR_ICON[m] || "↑", `Στο τέλος του δρόμου ${DIR_TEXT[m] ? DIR_TEXT[m].toLowerCase() : "συνέχισε"}`];
+      return [DIR_ICON[m] || "↑", (DIR_TEXT[m] || "Συνέχισε") + road];
+    }
+    function renderSteps(route) {
+      stepsEl.innerHTML = "";
+      const steps = (route.legs || []).flatMap(l => l.steps || []);
+      if (!steps.length) { stepsToggle.style.display = "none"; stepsEl.style.display = "none"; return; }
+      steps.forEach(s => {
+        const [ico, text] = stepInfo(s);
+        const div = document.createElement("div");
+        div.className = "step";
+        div.innerHTML = `<span class="ico">${ico}</span><span>${text}</span>` +
+          (s.distance > 0 ? `<span class="dist">${fmtDist(s.distance)}</span>` : "");
+        div.onclick = () => {
+          const [lon, lat] = [s.maneuver.location[0], s.maneuver.location[1]];
+          map.setView([lat, lon], 16);
+        };
+        stepsEl.appendChild(div);
+      });
+      stepsToggle.style.display = "block";
+      stepsToggle.textContent = "Οδηγίες βήμα-βήμα ▾";
+    }
   </script>
 </body>
 </html>

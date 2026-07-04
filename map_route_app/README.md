@@ -31,6 +31,7 @@ Two extra details make it "strict":
 | File | What it is |
 |---|---|
 | `index.html` | Complete, self-contained web app (works on mobile browsers): map, origin/destination autocomplete, route drawn as a polyline, distance + duration shown with a "traffic ignored" badge. |
+| `index_osm.html` | **No-API-key version** (OpenStreetMap + Leaflet + OSRM). OSRM routes on static OSM road data only — it has no access to live traffic at all, so it is traffic-free by construction. Just open the file in any browser. |
 | `route_no_traffic.py` | Command-line version: geocodes two addresses and prints distance/duration computed with `TRAFFIC_UNAWARE`. |
 
 ## Setup (once)

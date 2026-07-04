@@ -9,13 +9,16 @@ import android.service.notification.StatusBarNotification;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.text.Normalizer;
+import java.util.ArrayList;
+
 /**
  * Reads the phone's own incoming Viber notifications and stores messages
  * from the watched community groups, so the map can plot police checks /
  * accidents / alcohol tests reported there. Everything stays on-device.
  *
- * The user must grant "Notification access" to this app in Android Settings
- * (AndroidAlerts.openAccessSettings() opens that screen).
+ * Only notifications posted AFTER notification access is granted can be
+ * seen — Android never exposes past notifications.
  */
 public class AlertListener extends NotificationListenerService {
 
@@ -24,7 +27,14 @@ public class AlertListener extends NotificationListenerService {
     static final String KEY_ITEMS = "items";
     static final String KEY_GROUPS = "groups";       // '|'-separated group names
     static final long MAX_AGE_MS = 6L * 3600 * 1000; // keep 6h of history
-    static final int MAX_ITEMS = 150;
+    static final int MAX_ITEMS = 200;
+
+    /** Lowercase + strip Greek accents, so "Αλέρτ"/"αλερτ" etc. all match. */
+    static String norm(String s) {
+        if (s == null) return "";
+        return Normalizer.normalize(s, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "").toLowerCase();
+    }
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
@@ -35,39 +45,65 @@ public class AlertListener extends NotificationListenerService {
             Bundle ex = n.extras;
 
             CharSequence titleCs = ex.getCharSequence(Notification.EXTRA_TITLE);
-            CharSequence textCs = ex.getCharSequence(Notification.EXTRA_TEXT);
             String title = titleCs == null ? "" : titleCs.toString().trim();
-            String text = textCs == null ? "" : textCs.toString().trim();
-            if (text.isEmpty()) return;
 
             SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
 
-            // Keep only the configured groups (match by name substring).
+            // Keep only the configured groups (accent/case-insensitive match).
             String groups = sp.getString(KEY_GROUPS, "");
             if (!groups.isEmpty()) {
                 boolean match = false;
+                String nt = norm(title);
                 for (String g : groups.split("\\|")) {
-                    g = g.trim();
-                    if (!g.isEmpty() && title.toLowerCase().contains(g.toLowerCase())) {
-                        match = true;
-                        break;
-                    }
+                    g = norm(g.trim());
+                    if (!g.isEmpty() && nt.contains(g)) { match = true; break; }
                 }
                 if (!match) return;
             }
+
+            // Collect every text this notification carries: plain text,
+            // big text, and the stacked InboxStyle lines Viber uses when
+            // several messages are grouped into one notification.
+            ArrayList<String> texts = new ArrayList<>();
+            CharSequence t1 = ex.getCharSequence(Notification.EXTRA_TEXT);
+            CharSequence t2 = ex.getCharSequence(Notification.EXTRA_BIG_TEXT);
+            if (t1 != null && t1.length() > 0) texts.add(t1.toString().trim());
+            if (t2 != null && t2.length() > 0 && (t1 == null
+                    || !t2.toString().equals(t1.toString())))
+                texts.add(t2.toString().trim());
+            CharSequence[] lines = ex.getCharSequenceArray(Notification.EXTRA_TEXT_LINES);
+            if (lines != null) {
+                for (CharSequence l : lines) {
+                    if (l != null && l.length() > 0) texts.add(l.toString().trim());
+                }
+            }
+            if (texts.isEmpty()) return;
 
             JSONArray arr;
             try { arr = new JSONArray(sp.getString(KEY_ITEMS, "[]")); }
             catch (Exception e) { arr = new JSONArray(); }
 
-            JSONObject o = new JSONObject();
-            o.put("t", System.currentTimeMillis());
-            o.put("g", title);
-            o.put("m", text);
-            arr.put(o);
+            long now = System.currentTimeMillis();
+            for (String text : texts) {
+                if (text.isEmpty()) continue;
+                // Dedupe: Viber re-posts the same message in summary
+                // notifications; skip if we already stored this exact text.
+                boolean dup = false;
+                String ntext = norm(text);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject it = arr.getJSONObject(i);
+                    if (norm(it.optString("m")).equals(ntext)) { dup = true; break; }
+                }
+                if (dup) continue;
+
+                JSONObject o = new JSONObject();
+                o.put("t", now);
+                o.put("g", title);
+                o.put("m", text);
+                arr.put(o);
+            }
 
             // Prune by age and cap the count.
-            long now = System.currentTimeMillis();
             JSONArray keep = new JSONArray();
             int start = Math.max(0, arr.length() - MAX_ITEMS);
             for (int i = start; i < arr.length(); i++) {

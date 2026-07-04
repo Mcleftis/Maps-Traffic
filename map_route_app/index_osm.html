@@ -946,35 +946,55 @@
     // window.AndroidAlerts), αναγνωρίζει τύπο + τοποθεσία, και βάζει σημάδι
     // στον χάρτη. Χωρίς server — όλα τοπικά.
     // ====================================================================
-    // Ονόματα ομάδων που παρακολουθούμε (από το screenshot). Άλλαξέ τα εδώ.
-    const WATCH_GROUPS = ["Θεσσαλονίκη Αλερτ", "Δρακουμέλ"];
-    const ALERT_MAX_AGE = 3 * 3600 * 1000;   // 3 ώρες
+    // Ομάδες που παρακολουθούμε — αρκεί κομμάτι του ονόματος,
+    // χωρίς τόνους/κεφαλαία (το native κάνει accent-insensitive match).
+    const WATCH_GROUPS = ["αλερτ", "δρακουμ"];
+    const ALERT_MAX_AGE = 6 * 3600 * 1000;   // 6 ώρες
 
     const alertMarkers = {};                 // id → {marker, data}
     let alertsVisible = false;
     let alertLayer = L.layerGroup();
 
+    // Πεζά + χωρίς τόνους, για ανθεκτικό ταίριασμα λέξεων-κλειδιών.
+    function normTxt(s) {
+      return (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+    }
+
+    // Όλα τα μηνύματα των ομάδων εμφανίζονται — η κατηγορία καθορίζει
+    // μόνο το εικονίδιο. Καλύπτει και την αργκό των ομάδων:
+    // «πιστόλι» = ραντάρ, «χωμένοι» = κρυμμένη τροχαία,
+    // «ασφαλιστικό/με φάρους» = συμβατικό όχημα, «κάνουν βόλτες» = περιπολία.
     function alertType(text) {
-      const t = (text || "").toLowerCase();
-      if (/αλκοτ|αλκοόλ|αλκοο|μεθυσ/.test(t))
+      const t = normTxt(text);
+      if (/αλκοτ|αλκοολ|μεθυσ/.test(t))
         return { type: "alcotest", ico: "🍺", label: "Αλκοτέστ" };
-      if (/ατύχημα|ατυχημα|τρακάρ|τρακαρ|καραμπόλα|καραμπολα|σύγκρου|συγκρου|χτύπησ/.test(t))
+      if (/πιστολ|ρανταρ|καμερ/.test(t))
+        return { type: "radar", ico: "📸", label: "Ραντάρ" };
+      if (/ατυχημ|τρακαρ|καραμπολ|συγκρου|χτυπησ|αναποδογυρ/.test(t))
         return { type: "accident", ico: "💥", label: "Ατύχημα" };
-      if (/μπλόκο|μπλοκο|τροχαί|τροχαι|έλεγχ|ελεγχ|περιπολ|αστυνομ|κάμερα|καμερα|ραντάρ|ρανταρ|δίπλωμα/.test(t))
+      if (/φωτια|καπν|ντουμανι/.test(t))
+        return { type: "fire", ico: "🔥", label: "Φωτιά / Καπνός" };
+      if (/μπλοκ|τροχαι|ελεγχ|περιπολ|αστυνομ|χωμεν|ασφαλιστικ|φαρους|σταματ|βολτες|διπλωμ/.test(t))
         return { type: "police", ico: "🚓", label: "Τροχαία / Έλεγχος" };
-      return null;                           // άσχετο μήνυμα
+      return { type: "other", ico: "⚠️", label: "Αναφορά" };
     }
 
     function guessPlace(text) {
-      // Τοποθεσία μετά από «στην/στη/στο/στον/στα…».
-      const m = text.match(
-        /(?:στην|στη|στο|στον|στα|στις|στους)\s+([Α-ΩΆΈΉΊΌΎΏA-Z][\wΑ-Ωα-ωάέήίόύώϊϋΐΰ.\-]+(?:\s+[Α-ΩΆΈΉΊΌΎΏA-Z][\wΑ-Ωα-ωάέήίόύώ.\-]+){0,2})/);
-      return m ? m[1].trim() : null;
+      // Τοποθεσία μετά από πρόθεση ή λέξη-σημείο. Δουλεύει και με πεζά
+      // («μπλόκο στη λαμπρακη»). Χωρίς τόνους για το geocoding (ΟΚ για Nominatim).
+      const t = normTxt(text).replace(/^[^:]{2,25}:\s*/, ""); // κόψε "Όνομα: "
+      const m = t.match(
+        /(?:στην|στη|στο|στον|στα|στις|στους|διασταυρωση|κυκλακι|κομβο|υψος|εξω απο το|εξω απο|πριν τον|πριν την|πριν το|προς)\s+([a-zα-ω][\wͰ-Ͽ.\-]{2,}(?:\s+[a-zα-ω][\wͰ-Ͽ.\-]{2,})?)/);
+      if (!m) return null;
+      // Πέτα σκέτα άρθρα/συνδέσμους που τυχόν πιάστηκαν.
+      const place = m[1].replace(/\b(και|για|απο|του|της|των|ειναι|οτι)\b.*$/, "").trim();
+      return place.length >= 3 ? place : null;
     }
 
     function alertId(a) {
-      // Σταθερό id ανά μήνυμα (χρόνος + κείμενο).
-      return a.t + "|" + (a.m || "").slice(0, 40);
+      // Σταθερό id ανά μήνυμα (ομάδα + κείμενο) — όχι χρόνο, ώστε οι
+      // επαναδημοσιεύσεις του Viber να μη βγαίνουν διπλές.
+      return normTxt(a.g).slice(0, 15) + "|" + normTxt(a.m).slice(0, 60);
     }
 
     async function resolveAlert(a) {
@@ -1006,13 +1026,20 @@
       alertMarkers[r.id] = { marker, data: r };
     }
 
-    function renderAlertList(resolved) {
+    function renderAlertList(resolved, rawCount) {
       const list = $("alertsList");
       const items = resolved
         .filter(r => Date.now() - r.t <= ALERT_MAX_AGE)
         .sort((a, b) => b.t - a.t);
       if (!items.length) {
-        list.innerHTML = '<div class="empty">Καμία πρόσφατη ειδοποίηση.</div>';
+        list.innerHTML = '<div class="empty">' +
+          `Ελήφθησαν έως τώρα: <b>${rawCount || 0}</b> μηνύματα.<br><br>` +
+          "Διαβάζονται μόνο <b>νέες</b> ειδοποιήσεις — από τη στιγμή που δόθηκε " +
+          "η πρόσβαση και μετά (το Android δεν δίνει τις παλιές).<br><br>" +
+          "Για να πιάνει: οι ομάδες στο Viber να <b>μην είναι σε σίγαση</b> " +
+          "(να έρχονται κανονικά ειδοποιήσεις στην μπάρα), και το Viber να μην " +
+          "είναι ανοιχτό στη συνομιλία εκείνη την ώρα. " +
+          "Αν μόλις έδωσες την άδεια, κάνε μία επανεκκίνηση της εφαρμογής.</div>";
         return;
       }
       list.innerHTML = "";
@@ -1038,13 +1065,17 @@
 
       let raw = [];
       try { raw = JSON.parse(AndroidAlerts.list() || "[]"); } catch (e) { raw = []; }
-      const resolved = [];
+      const resolved = [], seen = {};
       for (const a of raw) {
         if (Date.now() - a.t > ALERT_MAX_AGE) continue;
         const r = await resolveAlert(a);
-        if (r) { resolved.push(r); renderAlertMarker(r); }
+        if (r && !seen[r.id]) {
+          seen[r.id] = true;
+          resolved.push(r);
+          renderAlertMarker(r);
+        }
       }
-      renderAlertList(resolved);
+      renderAlertList(resolved, raw.length);
       updateAlertsEnable();
     }
 
@@ -1074,7 +1105,7 @@
       try { AndroidAlerts && AndroidAlerts.clear(); } catch (e) {}
       Object.values(alertMarkers).forEach(o => o.marker.remove());
       for (const k in alertMarkers) delete alertMarkers[k];
-      renderAlertList([]);
+      renderAlertList([], 0);
     });
 
     // Περιοδικός έλεγχος για νέες ειδοποιήσεις.

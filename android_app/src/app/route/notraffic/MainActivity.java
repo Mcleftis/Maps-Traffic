@@ -5,10 +5,12 @@ import android.app.Activity;
 import android.app.PictureInPictureParams;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ComponentName;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.provider.Settings;
+import android.service.notification.NotificationListenerService;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -238,6 +240,20 @@ public class MainActivity extends Activity {
             // Let the page switch to a compact layout while floating.
             web.evaluateJavascript("document.body.classList."
                     + (isInPip ? "add" : "remove") + "('pip')", null);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // After the user grants Notification access, some devices don't bind
+        // the listener until a rebind is requested — ask for one every time
+        // the app comes to the foreground.
+        if (Build.VERSION.SDK_INT >= 24) {
+            try {
+                NotificationListenerService.requestRebind(
+                        new ComponentName(this, AlertListener.class));
+            } catch (Exception ignored) { }
         }
     }
 

@@ -2,26 +2,35 @@ package app.route.notraffic;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.PictureInPictureParams;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+import android.util.Rational;
+import android.view.WindowManager;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.view.WindowManager;
 
 import java.util.Locale;
 
 /**
- * Thin WebView shell around assets/index.html — the OpenStreetMap + OSRM
- * route app that computes routes without any real-time traffic data.
- * Provides a native Greek text-to-speech bridge (window.AndroidTTS) so
- * turn-by-turn instructions are spoken in Greek reliably.
+ * WebView shell around assets/index.html (OSM + OSRM navigation).
+ * Native extras:
+ *   - Greek text-to-speech bridge (window.AndroidTTS)
+ *   - audio ducking: lowers background music while speaking (like Maps)
+ *   - Picture-in-Picture: a small floating map window when you leave the app
  */
 public class MainActivity extends Activity {
 
@@ -30,6 +39,9 @@ public class MainActivity extends Activity {
     private String pendingGeoOrigin;
     private TextToSpeech tts;
     private boolean ttsGreekReady = false;
+    private AudioManager audioManager;
+    private AudioFocusRequest audioFocusReq;   // API 26+
+    private volatile boolean navigating = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -37,6 +49,8 @@ public class MainActivity extends Activity {
 
         // Navigation app: keep the screen on while in the foreground.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
         // Native Greek TTS engine.
         tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
@@ -47,7 +61,6 @@ public class MainActivity extends Activity {
                 if (r == TextToSpeech.LANG_MISSING_DATA
                         || r == TextToSpeech.LANG_NOT_SUPPORTED) {
                     ttsGreekReady = false;
-                    // Prompt the user to install Greek voice data once.
                     try {
                         startActivity(new Intent(
                                 TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA));
@@ -55,6 +68,16 @@ public class MainActivity extends Activity {
                 } else {
                     ttsGreekReady = true;
                 }
+                // Mark speech as navigation guidance (helps the system duck music).
+                tts.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build());
+                tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override public void onStart(String id) { }
+                    @Override public void onDone(String id) { duckMusic(false); }
+                    @Override public void onError(String id) { duckMusic(false); }
+                });
             }
         });
 
@@ -76,7 +99,6 @@ public class MainActivity extends Activity {
                 if (hasLocationPermission()) {
                     callback.invoke(origin, true, false);
                 } else if (Build.VERSION.SDK_INT >= 23) {
-                    // Ask the OS first; answer the page when the user decides.
                     pendingGeoCallback = callback;
                     pendingGeoOrigin = origin;
                     requestPermissions(new String[] {
@@ -87,9 +109,9 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        // Expose native Greek TTS to the page as window.AndroidTTS.
-        web.addJavascriptInterface(new TtsBridge(), "AndroidTTS");
 
+        web.addJavascriptInterface(new TtsBridge(), "AndroidTTS");
+        web.addJavascriptInterface(new AppBridge(), "AndroidApp");
         web.loadUrl("file:///android_asset/index.html");
 
         setContentView(web);
@@ -100,6 +122,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void speak(String text) {
             if (tts == null || !ttsGreekReady || text == null) return;
+            duckMusic(true);   // lower background music, then speak
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "nav");
         }
 
@@ -109,14 +132,70 @@ public class MainActivity extends Activity {
         }
     }
 
-    @Override
-    protected void onDestroy() {
-        if (tts != null) {
-            tts.stop();
-            tts.shutdown();
-            tts = null;
+    /** JavaScript bridge: window.AndroidApp.* (nav state / PiP support). */
+    private class AppBridge {
+        @JavascriptInterface
+        public void setNavigating(boolean on) {
+            navigating = on;
         }
-        super.onDestroy();
+
+        @JavascriptInterface
+        public boolean pipSupported() {
+            return Build.VERSION.SDK_INT >= 26 && getPackageManager()
+                    .hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+        }
+    }
+
+    // ---- Audio ducking: lower other apps' music while the guidance speaks ----
+    private void duckMusic(boolean duck) {
+        if (audioManager == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (duck) {
+                    audioFocusReq = new AudioFocusRequest.Builder(
+                            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                            .setAudioAttributes(new AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                    .build())
+                            .build();
+                    audioManager.requestAudioFocus(audioFocusReq);
+                } else if (audioFocusReq != null) {
+                    audioManager.abandonAudioFocusRequest(audioFocusReq);
+                    audioFocusReq = null;
+                }
+            } else {
+                if (duck) {
+                    audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC,
+                            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+                } else {
+                    audioManager.abandonAudioFocus(null);
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    // ---- Picture-in-Picture: shrink to a floating window when leaving ----
+    @Override
+    public void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        if (navigating && Build.VERSION.SDK_INT >= 26 && getPackageManager()
+                .hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            try {
+                enterPictureInPictureMode(new PictureInPictureParams.Builder()
+                        .setAspectRatio(new Rational(3, 4)).build());
+            } catch (Exception ignored) { }
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPip, Configuration newConfig) {
+        super.onPictureInPictureModeChanged(isInPip, newConfig);
+        if (web != null) {
+            // Let the page switch to a compact layout while floating.
+            web.evaluateJavascript("document.body.classList."
+                    + (isInPip ? "add" : "remove") + "('pip')", null);
+        }
     }
 
     private boolean hasLocationPermission() {
@@ -144,5 +223,16 @@ public class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        duckMusic(false);
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+            tts = null;
+        }
+        super.onDestroy();
     }
 }

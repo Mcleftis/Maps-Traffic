@@ -5,8 +5,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ANDROID_JAR=/usr/lib/android-sdk/platforms/android-23/android.jar
+# Compile/link against an API-34 framework stub (Robolectric's android-all,
+# which bundles resources.arsc) so newer symbols like PictureInPictureParams
+# and AudioFocusRequest resolve. Auto-downloaded once if missing.
+ANDROID_JAR=android-all-34.jar
+ANDROID_JAR_URL="https://repo1.maven.org/maven2/org/robolectric/android-all/14-robolectric-10818077/android-all-14-robolectric-10818077.jar"
 OUT=build
+
+if [ ! -f "$ANDROID_JAR" ]; then
+    echo "==> fetching framework stub ($ANDROID_JAR)"
+    curl -sSL -o "$ANDROID_JAR" "$ANDROID_JAR_URL"
+fi
 
 rm -rf "$OUT" && mkdir -p "$OUT/obj"
 

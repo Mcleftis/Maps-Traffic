@@ -114,6 +114,18 @@
       align-items: center; justify-content: center;
     }
 
+    /* ---- Συμπαγής όψη στο «μικρό παράθυρο» (Picture-in-Picture) ---- */
+    body.pip #panel,
+    body.pip #navBottom,
+    body.pip #recenterBtn,
+    body.pip .leaflet-control-container { display: none !important; }
+    body.pip #navBanner {
+      top: 4px; left: 4px; right: 4px; padding: 6px 8px; gap: 8px; border-radius: 8px;
+    }
+    body.pip #navBanner .bigico { font-size: 22px; width: 28px; }
+    body.pip #navDist { font-size: 15px; }
+    body.pip #navText { font-size: 11px; }
+
     .me-arrow {
       width: 0; height: 0; border-left: 11px solid transparent;
       border-right: 11px solid transparent; border-bottom: 26px solid #1a73e8;
@@ -757,6 +769,8 @@
       nav.lastPos = null;
       nav.firstFix = true;
       setFollow(true);
+      // Ενημέρωσε το Android ώστε να επιτρέψει το «μικρό παράθυρο» (PiP).
+      if (window.AndroidApp && AndroidApp.setNavigating) AndroidApp.setNavigating(true);
       $("panel").style.display = "none";
       $("navBanner").style.display = "flex";
       $("navBottom").style.display = "flex";
@@ -776,6 +790,7 @@
       if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
       nav.watchId = null;
       if (window.speechSynthesis) speechSynthesis.cancel();
+      if (window.AndroidApp && AndroidApp.setNavigating) AndroidApp.setNavigating(false);
       setFollow(true);                   // κρύψε το κουμπί επανακέντρου
       $("panel").style.display = "flex";
       $("navBanner").style.display = "none";

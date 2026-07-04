@@ -24,7 +24,7 @@ python3 make_icon.py
 
 echo "==> 2/6 javac"
 javac --release 8 -classpath "$ANDROID_JAR" -d "$OUT/obj" \
-    src/app/route/notraffic/MainActivity.java
+    src/app/route/notraffic/*.java
 
 echo "==> 3/6 dex"
 dalvik-exchange --dex --output="$OUT/classes.dex" "$OUT/obj"

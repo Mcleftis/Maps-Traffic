@@ -99,6 +99,34 @@
     }
     #navStop { background: #fce8e6 !important; color: #c5221f; font-weight: 700; }
 
+    /* ---- Ειδοποιήσεις ομάδων (Viber) ---- */
+    #alertsPanel { display: none; border-top: 1px solid #eee; margin-top: 4px; }
+    #alertsHead {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 13px; font-weight: 700; color: #c5221f; padding: 6px 2px 4px;
+    }
+    #alertsHead button { background: none; border: none; font-size: 15px; cursor: pointer; }
+    #alertsEnable { font-size: 13px; }
+    #alertsEnable button {
+      width: 100%; padding: 9px; margin: 2px 0 6px; border: none; border-radius: 6px;
+      background: #c5221f; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    #alertsList { max-height: 30vh; overflow-y: auto; }
+    #alertsList .a {
+      display: flex; gap: 9px; align-items: baseline;
+      padding: 7px 4px; font-size: 14px; border-bottom: 1px solid #f3f3f3; cursor: pointer;
+    }
+    #alertsList .a .ai { font-size: 18px; width: 24px; text-align: center; flex: none; }
+    #alertsList .a .am { flex: 1; }
+    #alertsList .a .am small { color: #888; }
+    #alertsList .a .at { color: #999; font-size: 11px; flex: none; }
+    #alertsList .empty { color: #888; font-size: 13px; padding: 8px 4px; }
+    .alert-pin {
+      font-size: 22px; text-align: center; line-height: 1;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
+    }
+    #alertsBtn.on { background: #c5221f !important; }
+
     .traffic-legend {
       background: #fff; padding: 6px 9px; border-radius: 6px;
       box-shadow: 0 1px 4px rgba(0,0,0,.3); font-size: 12px; line-height: 1.5;
@@ -160,11 +188,20 @@
         <button id="startNav">▶ Εκκίνηση</button>
         <button id="swap" title="Αντιστροφή">⇅</button>
         <button id="locate" title="Η θέση μου">📍</button>
+        <button id="alertsBtn" title="Ειδοποιήσεις ομάδων">🚨</button>
         <button id="clear" title="Καθαρισμός">✕</button>
       </div>
       <div id="result"></div>
       <button id="stepsToggle">Οδηγίες βήμα-βήμα ▾</button>
       <div id="steps"></div>
+      <div id="alertsPanel">
+        <div id="alertsHead">
+          <span>🚨 Ειδοποιήσεις ομάδων</span>
+          <button id="alertsClear" title="Καθαρισμός">🗑️</button>
+        </div>
+        <div id="alertsEnable"></div>
+        <div id="alertsList"></div>
+      </div>
     </div>
     <div id="map">
       <div id="navBanner">
@@ -902,6 +939,146 @@
         `<strong>${fmtDist(remaining)}</strong> · ${fmtDur(remainSec)} · άφιξη ${etaStr}` +
         (spdKmh != null ? ` · ${spdKmh} km/h` : "");
     }
+
+    // ====================================================================
+    // ΕΙΔΟΠΟΙΗΣΕΙΣ ΟΜΑΔΩΝ (Viber) — τροχαία / ατύχημα / αλκοτέστ.
+    // Διαβάζει τις ειδοποιήσεις που ήδη λαμβάνει το κινητό (native bridge
+    // window.AndroidAlerts), αναγνωρίζει τύπο + τοποθεσία, και βάζει σημάδι
+    // στον χάρτη. Χωρίς server — όλα τοπικά.
+    // ====================================================================
+    // Ονόματα ομάδων που παρακολουθούμε (από το screenshot). Άλλαξέ τα εδώ.
+    const WATCH_GROUPS = ["Θεσσαλονίκη Αλερτ", "Δρακουμέλ"];
+    const ALERT_MAX_AGE = 3 * 3600 * 1000;   // 3 ώρες
+
+    const alertMarkers = {};                 // id → {marker, data}
+    let alertsVisible = false;
+    let alertLayer = L.layerGroup();
+
+    function alertType(text) {
+      const t = (text || "").toLowerCase();
+      if (/αλκοτ|αλκοόλ|αλκοο|μεθυσ/.test(t))
+        return { type: "alcotest", ico: "🍺", label: "Αλκοτέστ" };
+      if (/ατύχημα|ατυχημα|τρακάρ|τρακαρ|καραμπόλα|καραμπολα|σύγκρου|συγκρου|χτύπησ/.test(t))
+        return { type: "accident", ico: "💥", label: "Ατύχημα" };
+      if (/μπλόκο|μπλοκο|τροχαί|τροχαι|έλεγχ|ελεγχ|περιπολ|αστυνομ|κάμερα|καμερα|ραντάρ|ρανταρ|δίπλωμα/.test(t))
+        return { type: "police", ico: "🚓", label: "Τροχαία / Έλεγχος" };
+      return null;                           // άσχετο μήνυμα
+    }
+
+    function guessPlace(text) {
+      // Τοποθεσία μετά από «στην/στη/στο/στον/στα…».
+      const m = text.match(
+        /(?:στην|στη|στο|στον|στα|στις|στους)\s+([Α-ΩΆΈΉΊΌΎΏA-Z][\wΑ-Ωα-ωάέήίόύώϊϋΐΰ.\-]+(?:\s+[Α-ΩΆΈΉΊΌΎΏA-Z][\wΑ-Ωα-ωάέήίόύώ.\-]+){0,2})/);
+      return m ? m[1].trim() : null;
+    }
+
+    function alertId(a) {
+      // Σταθερό id ανά μήνυμα (χρόνος + κείμενο).
+      return a.t + "|" + (a.m || "").slice(0, 40);
+    }
+
+    async function resolveAlert(a) {
+      const cls = alertType(a.m);
+      if (!cls) return null;
+      const place = guessPlace(a.m);
+      let coords = null;
+      if (place) {
+        // Γεωκωδικοποίηση με προτίμηση στην περιοχή της ομάδας.
+        const region = /χαλκιδικ|δρακουμ/i.test(a.g) ? "Χαλκιδική"
+          : /θεσσαλον/i.test(a.g) ? "Θεσσαλονίκη" : "";
+        try {
+          coords = await geocode(place + (region ? ", " + region : "") + ", Ελλάδα");
+        } catch (e) { coords = null; }
+      }
+      return { id: alertId(a), cls, place, coords, t: a.t, g: a.g, m: a.m };
+    }
+
+    function renderAlertMarker(r) {
+      if (!r.coords || alertMarkers[r.id]) return;
+      const marker = L.marker([r.coords.lat, r.coords.lon], {
+        icon: L.divIcon({ className: "", html: `<div class="alert-pin">${r.cls.ico}</div>`,
+          iconSize: [26, 26], iconAnchor: [13, 13] }),
+        zIndexOffset: 1500,
+      });
+      const when = new Date(r.t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
+      marker.bindPopup(`<b>${r.cls.ico} ${r.cls.label}</b><br>${r.m}<br><small>${r.g} · ${when}</small>`);
+      marker.addTo(alertLayer);
+      alertMarkers[r.id] = { marker, data: r };
+    }
+
+    function renderAlertList(resolved) {
+      const list = $("alertsList");
+      const items = resolved
+        .filter(r => Date.now() - r.t <= ALERT_MAX_AGE)
+        .sort((a, b) => b.t - a.t);
+      if (!items.length) {
+        list.innerHTML = '<div class="empty">Καμία πρόσφατη ειδοποίηση.</div>';
+        return;
+      }
+      list.innerHTML = "";
+      items.forEach(r => {
+        const when = new Date(r.t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
+        const div = document.createElement("div");
+        div.className = "a";
+        div.innerHTML = `<span class="ai">${r.cls.ico}</span>` +
+          `<span class="am">${r.m}<br><small>${r.g}${r.place ? " · " + r.place : ""}</small></span>` +
+          `<span class="at">${when}</span>`;
+        div.onclick = () => {
+          if (r.coords) { map.setView([r.coords.lat, r.coords.lon], 15); map.closePopup();
+            if (alertMarkers[r.id]) alertMarkers[r.id].marker.openPopup(); }
+        };
+        list.appendChild(div);
+      });
+    }
+
+    async function refreshAlerts() {
+      if (!window.AndroidAlerts) return;
+      // Ενημέρωσε το native για τις ομάδες που παρακολουθούμε.
+      try { AndroidAlerts.setGroups(WATCH_GROUPS.join("|")); } catch (e) {}
+
+      let raw = [];
+      try { raw = JSON.parse(AndroidAlerts.list() || "[]"); } catch (e) { raw = []; }
+      const resolved = [];
+      for (const a of raw) {
+        if (Date.now() - a.t > ALERT_MAX_AGE) continue;
+        const r = await resolveAlert(a);
+        if (r) { resolved.push(r); renderAlertMarker(r); }
+      }
+      renderAlertList(resolved);
+      updateAlertsEnable();
+    }
+
+    function updateAlertsEnable() {
+      const box = $("alertsEnable");
+      const has = window.AndroidAlerts && AndroidAlerts.hasAccess && AndroidAlerts.hasAccess();
+      if (window.AndroidAlerts && !has) {
+        box.innerHTML = '<button id="alertsGrant">Ενεργοποίηση: δώσε πρόσβαση στις ειδοποιήσεις</button>';
+        $("alertsGrant").onclick = () => AndroidAlerts.openAccessSettings();
+      } else if (!window.AndroidAlerts) {
+        box.innerHTML = '<div class="empty">Διαθέσιμο μόνο στην έκδοση APK (ανάγνωση ειδοποιήσεων Viber).</div>';
+      } else {
+        box.innerHTML = "";
+      }
+    }
+
+    $("alertsBtn").addEventListener("click", () => {
+      alertsVisible = !alertsVisible;
+      $("alertsBtn").classList.toggle("on", alertsVisible);
+      $("alertsPanel").style.display = alertsVisible ? "block" : "none";
+      if (alertsVisible) {
+        alertLayer.addTo(map);
+        refreshAlerts();
+      }
+    });
+    $("alertsClear").addEventListener("click", () => {
+      try { AndroidAlerts && AndroidAlerts.clear(); } catch (e) {}
+      Object.values(alertMarkers).forEach(o => o.marker.remove());
+      for (const k in alertMarkers) delete alertMarkers[k];
+      renderAlertList([]);
+    });
+
+    // Περιοδικός έλεγχος για νέες ειδοποιήσεις.
+    setInterval(() => { if (alertsVisible) refreshAlerts(); }, 15000);
   </script>
 </body>
 </html>

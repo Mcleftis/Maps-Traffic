@@ -5,8 +5,10 @@ import android.app.Activity;
 import android.app.PictureInPictureParams;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.provider.Settings;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -112,6 +114,7 @@ public class MainActivity extends Activity {
 
         web.addJavascriptInterface(new TtsBridge(), "AndroidTTS");
         web.addJavascriptInterface(new AppBridge(), "AndroidApp");
+        web.addJavascriptInterface(new AlertsBridge(), "AndroidAlerts");
         web.loadUrl("file:///android_asset/index.html");
 
         setContentView(web);
@@ -143,6 +146,46 @@ public class MainActivity extends Activity {
         public boolean pipSupported() {
             return Build.VERSION.SDK_INT >= 26 && getPackageManager()
                     .hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+        }
+    }
+
+    /** JavaScript bridge: window.AndroidAlerts.* (Viber group alerts). */
+    private class AlertsBridge {
+        @JavascriptInterface
+        public String list() {
+            return getSharedPreferences(AlertListener.PREFS, MODE_PRIVATE)
+                    .getString(AlertListener.KEY_ITEMS, "[]");
+        }
+
+        @JavascriptInterface
+        public void setGroups(String pipeSeparated) {
+            getSharedPreferences(AlertListener.PREFS, MODE_PRIVATE).edit()
+                    .putString(AlertListener.KEY_GROUPS,
+                            pipeSeparated == null ? "" : pipeSeparated).apply();
+        }
+
+        @JavascriptInterface
+        public boolean hasAccess() {
+            String enabled = Settings.Secure.getString(getContentResolver(),
+                    "enabled_notification_listeners");
+            return enabled != null && enabled.contains(getPackageName());
+        }
+
+        @JavascriptInterface
+        public void openAccessSettings() {
+            try {
+                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                try { startActivity(new Intent(Settings.ACTION_SETTINGS)); }
+                catch (Exception ignored) { }
+            }
+        }
+
+        @JavascriptInterface
+        public void clear() {
+            getSharedPreferences(AlertListener.PREFS, MODE_PRIVATE).edit()
+                    .putString(AlertListener.KEY_ITEMS, "[]").apply();
         }
     }
 

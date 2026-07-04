@@ -260,13 +260,25 @@
     const resultEl = $("result"), stepsEl = $("steps"), stepsToggle = $("stepsToggle");
 
     // ---- Autocomplete (Photon) ------------------------------------------
-    function attachAutocomplete(inputId, sugId, setPoint) {
+    function attachAutocomplete(inputId, sugId, setPoint, showMyLoc) {
       const input = $(inputId), sug = $(sugId);
       let timer = null;
+      // «📍 Η θέση μου» ως πρώτη επιλογή όταν το πεδίο αφετηρίας είναι άδειο.
+      function showMyLocationOption() {
+        if (!showMyLoc || input.value.trim() !== "") return;
+        sug.innerHTML = "";
+        const div = document.createElement("div");
+        div.innerHTML = "📍 <b>Η θέση μου</b>";
+        div.onclick = () => { sug.style.display = "none"; useMyLocation(); };
+        sug.appendChild(div);
+        sug.style.display = "block";
+      }
+      input.addEventListener("focus", showMyLocationOption);
       input.addEventListener("input", () => {
         setPoint(null);                  // ο χρήστης αλλάζει το κείμενο
         clearTimeout(timer);
         const q = input.value.trim();
+        if (q === "") { showMyLocationOption(); return; }
         if (q.length < 3) { sug.style.display = "none"; return; }
         timer = setTimeout(async () => {
           try {
@@ -300,7 +312,7 @@
         if (!sug.contains(e.target) && e.target !== input) sug.style.display = "none";
       });
     }
-    attachAutocomplete("origin", "originSug", p => { origin = p; if (p) placeMarker("A", p); });
+    attachAutocomplete("origin", "originSug", p => { origin = p; if (p) placeMarker("A", p); }, true);
     attachAutocomplete("destination", "destSug", p => { dest = p; if (p) placeMarker("B", p); });
 
     // ---- Geocoding fallback / reverse -----------------------------------
@@ -354,7 +366,8 @@
     };
 
     // ---- Η θέση μου ------------------------------------------------------
-    $("locate").addEventListener("click", () => {
+    // Ορίζει την τρέχουσα θέση GPS ως αφετηρία (κουμπί 📍 ή επιλογή στη λίστα).
+    function useMyLocation() {
       if (!navigator.geolocation) {
         resultEl.innerHTML = '<span class="error">Δεν υποστηρίζεται εντοπισμός θέσης.</span>';
         return;
@@ -371,7 +384,8 @@
       }, err => {
         resultEl.innerHTML = `<span class="error">Αποτυχία εντοπισμού: ${err.message}</span>`;
       }, { enableHighAccuracy: true, timeout: 15000 });
-    });
+    }
+    $("locate").addEventListener("click", useMyLocation);
 
     // ---- Λειτουργίες μετακίνησης ----------------------------------------
     document.querySelectorAll("#modes button").forEach(b => {

@@ -47,6 +47,7 @@
     }
     #go { flex: 1; background: #1a73e8 !important; color: #fff !important; }
     #go:disabled { background: #9cbcf0 !important; }
+    #startNav { display: none; flex: 1; background: #188038 !important; color: #fff !important; }
 
     #result { font-size: 14px; color: #333; min-height: 0; }
     #result .badge {
@@ -72,7 +73,38 @@
     #steps .ico { font-size: 17px; width: 22px; text-align: center; flex: none; }
     #steps .dist { margin-left: auto; color: #888; font-size: 12px; flex: none; }
 
-    #map { flex: 1; }
+    #map { flex: 1; position: relative; }
+
+    /* ---- Λειτουργία πλοήγησης ---- */
+    #navBanner {
+      display: none; position: absolute; top: 10px; left: 10px; right: 10px;
+      z-index: 1500; background: #188038; color: #fff; border-radius: 10px;
+      padding: 12px 14px; box-shadow: 0 3px 10px rgba(0,0,0,.35);
+      align-items: center; gap: 14px;
+    }
+    #navBanner .bigico { font-size: 34px; flex: none; width: 44px; text-align: center; }
+    #navDist { font-size: 22px; font-weight: 700; line-height: 1.1; }
+    #navText { font-size: 15px; opacity: .95; }
+    #navBottom {
+      display: none; position: absolute; left: 10px; right: 10px; bottom: 12px;
+      z-index: 1500; background: #fff; border-radius: 10px;
+      padding: 10px 12px; box-shadow: 0 3px 10px rgba(0,0,0,.35);
+      align-items: center; gap: 8px;
+    }
+    #navStats { flex: 1; font-size: 15px; }
+    #navStats strong { font-size: 17px; }
+    #navBottom button {
+      border: none; border-radius: 8px; padding: 10px 12px;
+      font-size: 17px; cursor: pointer; background: #eee;
+    }
+    #navStop { background: #fce8e6 !important; color: #c5221f; font-weight: 700; }
+
+    .me-arrow {
+      width: 0; height: 0; border-left: 11px solid transparent;
+      border-right: 11px solid transparent; border-bottom: 26px solid #1a73e8;
+      filter: drop-shadow(0 0 3px rgba(255,255,255,.9));
+      transform-origin: 50% 65%;
+    }
     .leaflet-popup-content button {
       display: block; width: 100%; margin: 4px 0; padding: 8px 10px;
       border: none; border-radius: 5px; background: #1a73e8; color: #fff;
@@ -98,6 +130,7 @@
       </div>
       <div id="actions">
         <button id="go">Διαδρομή</button>
+        <button id="startNav">▶ Εκκίνηση</button>
         <button id="swap" title="Αντιστροφή">⇅</button>
         <button id="locate" title="Η θέση μου">📍</button>
         <button id="clear" title="Καθαρισμός">✕</button>
@@ -106,7 +139,20 @@
       <button id="stepsToggle">Οδηγίες βήμα-βήμα ▾</button>
       <div id="steps"></div>
     </div>
-    <div id="map"></div>
+    <div id="map">
+      <div id="navBanner">
+        <span class="bigico" id="navIco">↑</span>
+        <div>
+          <div id="navDist">—</div>
+          <div id="navText">Εκκίνηση διαδρομής</div>
+        </div>
+      </div>
+      <div id="navBottom">
+        <span id="navStats">—</span>
+        <button id="navMute" title="Φωνητικές οδηγίες">🔊</button>
+        <button id="navStop" title="Τερματισμός">✕</button>
+      </div>
+    </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -115,6 +161,7 @@
     // Διαδρομές ΧΩΡΙΣ real-time κίνηση: OSRM (routing.openstreetmap.de)
     // δρομολογεί μόνο με στατικά δεδομένα δρόμων του OpenStreetMap.
     // Geocoding/autocomplete: Photon + Nominatim (δωρεάν, χωρίς κλειδί).
+    // Ζωντανή πλοήγηση: watchPosition + προβολή θέσης πάνω στη διαδρομή.
     // ====================================================================
     const PROFILES = {
       car:  "https://routing.openstreetmap.de/routed-car/route/v1/driving",
@@ -143,6 +190,7 @@
     let origin = null, dest = null;      // {lat, lon}
     let markerA = null, markerB = null, myPosMarker = null;
     let routeLines = [];                 // [{line, route}]
+    let activeIdx = 0;
     let mode = "car";
 
     const $ = id => document.getElementById(id);
@@ -207,7 +255,7 @@
       } catch (e) { return `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`; }
     }
 
-    // ---- Δείκτες (συρόμενοι, όπως στο Google Maps) ----------------------
+    // ---- Δείκτες (συρόμενοι) --------------------------------------------
     function placeMarker(which, p) {
       const isA = which === "A";
       let m = isA ? markerA : markerB;
@@ -226,6 +274,7 @@
 
     // ---- Πάτημα στον χάρτη → ορισμός σημείου ----------------------------
     map.on("click", e => {
+      if (nav.active) return;            // όχι popup κατά την πλοήγηση
       const { lat, lng } = e.latlng;
       const html =
         `<button onclick="setPointHere('A',${lat},${lng})">Αφετηρία εδώ</button>` +
@@ -248,14 +297,10 @@
         return;
       }
       resultEl.textContent = "Εντοπισμός θέσης…";
-      navigator.geolocation.getCurrentPosition(async pos => {
+      navigator.geolocation.getCurrentPosition(pos => {
         const p = { lat: pos.coords.latitude, lon: pos.coords.longitude };
         origin = p;
         placeMarker("A", p);
-        if (myPosMarker) myPosMarker.remove();
-        myPosMarker = L.circleMarker([p.lat, p.lon], {
-          radius: 8, color: "#fff", weight: 2, fillColor: "#1a73e8", fillOpacity: 1,
-        }).addTo(map);
         $("origin").value = "Η θέση μου";
         map.setView([p.lat, p.lon], Math.max(map.getZoom(), 14));
         resultEl.textContent = "";
@@ -284,12 +329,14 @@
       maybeRoute();
     });
     $("clear").addEventListener("click", () => {
+      stopNavigation();
       origin = dest = null;
       $("origin").value = $("destination").value = "";
       [markerA, markerB, myPosMarker].forEach(m => m && m.remove());
       markerA = markerB = myPosMarker = null;
       clearRoutes();
       resultEl.textContent = "";
+      $("startNav").style.display = "none";
       stepsEl.style.display = "none"; stepsToggle.style.display = "none";
     });
     $("go").addEventListener("click", calculateRoute);
@@ -325,10 +372,10 @@
       }
 
       $("go").disabled = true;
-      resultEl.textContent = "Υπολογισμός…";
+      if (!nav.active) resultEl.textContent = "Υπολογισμός…";
       try {
         const url = `${PROFILES[mode]}/${origin.lon},${origin.lat};${dest.lon},${dest.lat}` +
-          `?overview=full&geometries=geojson&alternatives=true&steps=true`;
+          `?overview=full&geometries=geojson&alternatives=${nav.active ? "false" : "true"}&steps=true`;
         const data = await (await fetch(url)).json();
         if (data.code !== "Ok" || !data.routes.length)
           throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");
@@ -348,16 +395,23 @@
           ? { color: "#1a73e8", weight: 6, opacity: 0.95 }
           : { color: "#9aa0a6", weight: 5, opacity: 0.8, dashArray: "6 8" }
         ).addTo(map);
-        line.on("click", () => selectRoute(i));
+        line.on("click", () => { if (!nav.active) selectRoute(i); });
         routeLines.push({ line, route });
       });
-      // Η κύρια διαδρομή πάνω από τις εναλλακτικές.
       routeLines[0].line.bringToFront();
-      map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
-      showRouteInfo(0);
+      activeIdx = 0;
+      if (nav.active) {
+        // Επαναϋπολογισμός εν κινήσει: νέα δεδομένα πλοήγησης, χωρίς fitBounds.
+        buildNavData(routeLines[0].route);
+      } else {
+        map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
+        showRouteInfo(0);
+        $("startNav").style.display = "block";
+      }
     }
 
     function selectRoute(idx) {
+      activeIdx = idx;
       routeLines.forEach(({ line }, i) => {
         line.setStyle(i === idx
           ? { color: "#1a73e8", weight: 6, opacity: 0.95, dashArray: null }
@@ -422,13 +476,232 @@
         div.innerHTML = `<span class="ico">${ico}</span><span>${text}</span>` +
           (s.distance > 0 ? `<span class="dist">${fmtDist(s.distance)}</span>` : "");
         div.onclick = () => {
-          const [lon, lat] = [s.maneuver.location[0], s.maneuver.location[1]];
-          map.setView([lat, lon], 16);
+          map.setView([s.maneuver.location[1], s.maneuver.location[0]], 16);
         };
         stepsEl.appendChild(div);
       });
       stepsToggle.style.display = "block";
       stepsToggle.textContent = "Οδηγίες βήμα-βήμα ▾";
+    }
+
+    // ====================================================================
+    // ΖΩΝΤΑΝΗ ΠΛΟΗΓΗΣΗ
+    // ====================================================================
+    const nav = {
+      active: false, watchId: null, muted: false,
+      pts: [], cum: [], mans: [], total: 0, duration: 0,
+      lastPos: null, offCount: 0, recalcing: false,
+      announced: {},                     // ανά ελιγμό: 1=προαναγγέλθηκε, 2=τελική
+    };
+
+    const toRad = d => d * Math.PI / 180;
+    function havDist(a, b) {             // [lat,lon] ζεύγη → μέτρα
+      const R = 6371000;
+      const dLat = toRad(b[0] - a[0]), dLon = toRad(b[1] - a[1]);
+      const s = Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(s));
+    }
+    function bearing(a, b) {
+      const y = Math.sin(toRad(b[1] - a[1])) * Math.cos(toRad(b[0]));
+      const x = Math.cos(toRad(a[0])) * Math.sin(toRad(b[0])) -
+        Math.sin(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.cos(toRad(b[1] - a[1]));
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function buildNavData(route) {
+      nav.pts = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      nav.cum = [0];
+      for (let i = 1; i < nav.pts.length; i++)
+        nav.cum.push(nav.cum[i - 1] + havDist(nav.pts[i - 1], nav.pts[i]));
+      nav.total = nav.cum[nav.cum.length - 1];
+      nav.duration = route.duration;
+      const steps = (route.legs || []).flatMap(l => l.steps || []);
+      nav.mans = steps.map(s => {
+        const ml = [s.maneuver.location[1], s.maneuver.location[0]];
+        let best = 0, bd = Infinity;
+        for (let i = 0; i < nav.pts.length; i++) {
+          const d = havDist(nav.pts[i], ml);
+          if (d < bd) { bd = d; best = i; }
+        }
+        return { step: s, at: nav.cum[best] };
+      });
+      nav.announced = {};
+      nav.offCount = 0;
+    }
+
+    // Προβολή θέσης πάνω στη διαδρομή: απόσταση κατά μήκος + απόκλιση.
+    function snapToRoute(p) {            // p=[lat,lon]
+      let best = { off: Infinity, along: 0 };
+      const cosLat = Math.cos(toRad(p[0]));
+      const mx = lon => lon * cosLat * 111320, my = lat => lat * 110540;
+      const px = mx(p[1]), py = my(p[0]);
+      for (let i = 1; i < nav.pts.length; i++) {
+        const ax = mx(nav.pts[i - 1][1]), ay = my(nav.pts[i - 1][0]);
+        const bx = mx(nav.pts[i][1]), by = my(nav.pts[i][0]);
+        const vx = bx - ax, vy = by - ay;
+        const len2 = vx * vx + vy * vy;
+        const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
+        const dx = px - (ax + t * vx), dy = py - (ay + t * vy);
+        const off = Math.sqrt(dx * dx + dy * dy);
+        if (off < best.off) {
+          best = { off, along: nav.cum[i - 1] + t * (nav.cum[i] - nav.cum[i - 1]) };
+        }
+      }
+      return best;
+    }
+
+    function speak(text) {
+      if (nav.muted) return;
+      try {
+        if (!window.speechSynthesis) return;
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = "el-GR";
+        u.rate = 1.05;
+        speechSynthesis.cancel();
+        speechSynthesis.speak(u);
+      } catch (e) { /* χωρίς φωνή — μόνο οπτικά */ }
+    }
+    function spokenDist(m) {
+      if (m >= 950) return `${(Math.round(m / 100) / 10).toString().replace(".", " κόμμα ")} χιλιόμετρα`;
+      return `${Math.round(m / 10) * 10} μέτρα`;
+    }
+
+    // ---- Εκκίνηση / τερματισμός -----------------------------------------
+    $("startNav").addEventListener("click", startNavigation);
+    $("navStop").addEventListener("click", stopNavigation);
+    $("navMute").addEventListener("click", () => {
+      nav.muted = !nav.muted;
+      $("navMute").textContent = nav.muted ? "🔇" : "🔊";
+      if (nav.muted && window.speechSynthesis) speechSynthesis.cancel();
+    });
+
+    function startNavigation() {
+      if (!routeLines.length) return;
+      if (!navigator.geolocation) {
+        resultEl.innerHTML = '<span class="error">Δεν υποστηρίζεται εντοπισμός θέσης.</span>';
+        return;
+      }
+      buildNavData(routeLines[activeIdx].route);
+      // Κράτα μόνο την ενεργή διαδρομή στον χάρτη.
+      routeLines.forEach((r, i) => { if (i !== activeIdx) r.line.remove(); });
+      routeLines = [routeLines[activeIdx]];
+      activeIdx = 0;
+
+      nav.active = true;
+      nav.lastPos = null;
+      $("panel").style.display = "none";
+      $("navBanner").style.display = "flex";
+      $("navBottom").style.display = "flex";
+      $("navText").textContent = "Εκκίνηση διαδρομής";
+      $("navDist").textContent = "";
+      $("navIco").textContent = "●";
+      speak("Εκκίνηση διαδρομής.");
+
+      nav.watchId = navigator.geolocation.watchPosition(onNavPosition, err => {
+        $("navText").textContent = "Αποτυχία GPS: " + err.message;
+      }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+    }
+
+    function stopNavigation() {
+      if (!nav.active) return;
+      nav.active = false;
+      if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
+      nav.watchId = null;
+      if (window.speechSynthesis) speechSynthesis.cancel();
+      $("panel").style.display = "flex";
+      $("navBanner").style.display = "none";
+      $("navBottom").style.display = "none";
+      if (routeLines.length) map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
+    }
+
+    // ---- Κάθε νέο στίγμα GPS --------------------------------------------
+    function onNavPosition(pos) {
+      if (!nav.active) return;
+      const p = [pos.coords.latitude, pos.coords.longitude];
+
+      // Δείκτης θέσης με βέλος κατεύθυνσης.
+      let heading = pos.coords.heading;
+      if ((heading === null || isNaN(heading)) && nav.lastPos && havDist(nav.lastPos, p) > 3) {
+        heading = bearing(nav.lastPos, p);
+      }
+      if (!myPosMarker) {
+        myPosMarker = L.marker(p, {
+          icon: L.divIcon({ className: "", html: '<div class="me-arrow"></div>', iconSize: [22, 26], iconAnchor: [11, 17] }),
+          zIndexOffset: 2000,
+        }).addTo(map);
+      } else {
+        myPosMarker.setLatLng(p);
+      }
+      if (heading !== null && !isNaN(heading)) {
+        const el = myPosMarker.getElement();
+        const arrow = el && el.querySelector(".me-arrow");
+        if (arrow) arrow.style.transform = `rotate(${heading}deg)`;
+      }
+      map.setView(p, Math.max(map.getZoom(), 16), { animate: true });
+      nav.lastPos = p;
+
+      const snap = snapToRoute(p);
+
+      // Εκτός διαδρομής; (3 συνεχόμενα στίγματα > 40 m μακριά)
+      if (snap.off > 40) {
+        nav.offCount++;
+        if (nav.offCount >= 3 && !nav.recalcing) {
+          nav.recalcing = true;
+          $("navText").textContent = "Επαναϋπολογισμός διαδρομής…";
+          speak("Επαναϋπολογισμός διαδρομής.");
+          origin = { lat: p[0], lon: p[1] };
+          placeMarker("A", origin);
+          calculateRoute().finally(() => { nav.recalcing = false; nav.offCount = 0; });
+          return;
+        }
+      } else {
+        nav.offCount = 0;
+      }
+
+      // Άφιξη;
+      const remaining = Math.max(0, nav.total - snap.along);
+      if (remaining < 25) {
+        $("navIco").textContent = "🏁";
+        $("navDist").textContent = "";
+        $("navText").textContent = "Έφτασες στον προορισμό!";
+        speak("Έφτασες στον προορισμό.");
+        setTimeout(stopNavigation, 4000);
+        return;
+      }
+
+      // Επόμενος ελιγμός.
+      let next = null, nextIdx = -1;
+      for (let i = 0; i < nav.mans.length; i++) {
+        if (nav.mans[i].at > snap.along + 8) { next = nav.mans[i]; nextIdx = i; break; }
+      }
+      if (next) {
+        const dTo = next.at - snap.along;
+        const [ico, text] = stepInfo(next.step);
+        $("navIco").textContent = ico;
+        $("navDist").textContent = fmtDist(dTo);
+        $("navText").textContent = text;
+
+        // Φωνητικές αναγγελίες: μία προειδοποίηση, μία τελική.
+        const key = nextIdx;
+        const warnAt = mode === "car" ? 350 : 120;
+        const nowAt = mode === "car" ? 60 : 25;
+        const plain = text.replace(/[«»]/g, "");
+        if (dTo < nowAt && nav.announced[key] !== 2) {
+          nav.announced[key] = 2;
+          speak(plain);
+        } else if (dTo < warnAt && !nav.announced[key]) {
+          nav.announced[key] = 1;
+          speak(`Σε ${spokenDist(dTo)}, ${plain.toLowerCase()}`);
+        }
+      }
+
+      // Κάτω μπάρα: υπόλοιπο + εκτίμηση άφιξης.
+      const remainSec = nav.duration * (remaining / nav.total);
+      const eta = new Date(Date.now() + remainSec * 1000);
+      const etaStr = eta.toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
+      $("navStats").innerHTML =
+        `<strong>${fmtDist(remaining)}</strong> · ${fmtDur(remainSec)} · άφιξη ${etaStr}`;
     }
   </script>
 </body>

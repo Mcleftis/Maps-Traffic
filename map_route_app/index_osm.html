@@ -196,7 +196,7 @@
       <div id="steps"></div>
       <div id="alertsPanel">
         <div id="alertsHead">
-          <span>🚨 Ειδοποιήσεις ομάδων</span>
+          <span>🚨 Ζωντανές αναφορές (Waze + ομάδες)</span>
           <button id="alertsClear" title="Καθαρισμός">🗑️</button>
         </div>
         <div id="alertsEnable"></div>
@@ -808,6 +808,9 @@
       setFollow(true);
       // Ενημέρωσε το Android ώστε να επιτρέψει το «μικρό παράθυρο» (PiP).
       if (window.AndroidApp && AndroidApp.setNavigating) AndroidApp.setNavigating(true);
+      // Στην πλοήγηση οι ζωντανές αναφορές (Waze) ανάβουν αυτόματα.
+      alertLayer.addTo(map);
+      refreshAlerts();
       $("panel").style.display = "none";
       $("navBanner").style.display = "flex";
       $("navBottom").style.display = "flex";
@@ -893,6 +896,9 @@
 
       // Σβήσε το κομμάτι που ήδη διανύθηκε — κράτα ορατό μόνο το μπροστά.
       if (!nav.recalcing && routeLines.length) trimRouteAhead(snap.along);
+
+      // Φωνητική προειδοποίηση για τροχαία/ατύχημα (Waze) κοντά σου.
+      warnNearbyWaze(p);
 
       // Άφιξη;
       const remaining = Math.max(0, nav.total - snap.along);
@@ -1039,67 +1045,173 @@
       alertMarkers[r.id] = { marker, data: r };
     }
 
-    function renderAlertList(resolved, rawCount) {
+    // ------------------------------------------------------------------
+    // WAZE LIVE ALERTS — η κύρια πηγή: ζωντανές αναφορές οδηγών (τροχαία,
+    // ατυχήματα, κίνδυνοι) με ακριβείς συντεταγμένες. Χωρίς κλειδί.
+    // ------------------------------------------------------------------
+    const WAZE_TYPES = {
+      POLICE:      { ico: "🚓", label: "Τροχαία" },
+      ACCIDENT:    { ico: "💥", label: "Ατύχημα" },
+      HAZARD:      { ico: "⚠️", label: "Κίνδυνος στον δρόμο" },
+      ROAD_CLOSED: { ico: "🚧", label: "Κλειστός δρόμος" },
+    };
+    let wazeItems = [];                    // τελευταία απάντηση (για τη λίστα)
+    const wazeMarkers = {};                // uuid → marker
+    const wazeAnnounced = {};              // uuid → ειπώθηκε φωνητικά
+    let wazeError = "";
+
+    function wazeAge(t) {
+      const min = Math.max(0, Math.round((Date.now() - t) / 60000));
+      if (min < 1) return "τώρα";
+      if (min < 60) return `πριν ${min} λεπ`;
+      return `πριν ${Math.floor(min / 60)} ώρ ${min % 60} λεπ`;
+    }
+
+    async function refreshWaze() {
+      const b = map.getBounds();
+      // Το Waze θέλει λογικό παράθυρο — σε πολύ μακρινό ζουμ δεν απαντά.
+      if (b.getNorth() - b.getSouth() > 2.5 || b.getEast() - b.getWest() > 3) {
+        wazeError = "Κάνε ζουμ πιο κοντά για να φανούν οι αναφορές Waze.";
+        return;
+      }
+      const box = `top=${b.getNorth()}&bottom=${b.getSouth()}` +
+        `&left=${b.getWest()}&right=${b.getEast()}`;
+      const urls = [
+        `https://www.waze.com/live-map/api/georss?${box}&env=row&types=alerts`,
+        `https://www.waze.com/rtserver/web/TGeoRSS?tk=community&format=JSON&${box}`,
+      ];
+      for (const url of urls) {
+        try {
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          const data = await resp.json();
+          wazeError = "";
+          renderWaze((data.alerts || []).filter(a => WAZE_TYPES[a.type]));
+          return;
+        } catch (e) {
+          wazeError = "Waze: αποτυχία λήψης (" + e.message + ")";
+        }
+      }
+    }
+
+    function renderWaze(alerts) {
+      wazeItems = alerts;
+      const live = {};
+      alerts.forEach(a => {
+        live[a.uuid] = true;
+        if (wazeMarkers[a.uuid]) return;   // υπάρχει ήδη
+        const wt = WAZE_TYPES[a.type];
+        const label = a.subType === "POLICE_HIDING" ? "Κρυμμένη τροχαία" : wt.label;
+        const m = L.marker([a.location.y, a.location.x], {
+          icon: L.divIcon({ className: "", html: `<div class="alert-pin">${wt.ico}</div>`,
+            iconSize: [26, 26], iconAnchor: [13, 13] }),
+          zIndexOffset: 1400,
+        });
+        m.bindPopup(`<b>${wt.ico} ${label}</b><br>` +
+          `${[a.street, a.city].filter(Boolean).join(", ") || "—"}<br>` +
+          `<small>Waze · ${wazeAge(a.pubMillis)} · 👍 ${a.nThumbsUp || 0}</small>`);
+        m.addTo(alertLayer);
+        wazeMarkers[a.uuid] = m;
+      });
+      // Καθάρισε αναφορές που έληξαν.
+      for (const id in wazeMarkers) {
+        if (!live[id]) { wazeMarkers[id].remove(); delete wazeMarkers[id]; }
+      }
+    }
+
+    // Φωνητική προειδοποίηση όσο οδηγείς: τροχαία/ατύχημα σε <600 m.
+    function warnNearbyWaze(p) {
+      for (const a of wazeItems) {
+        if (a.type !== "POLICE" && a.type !== "ACCIDENT") continue;
+        if (wazeAnnounced[a.uuid]) continue;
+        const d = havDist(p, [a.location.y, a.location.x]);
+        if (d < 600) {
+          wazeAnnounced[a.uuid] = true;
+          const label = a.type === "POLICE"
+            ? (a.subType === "POLICE_HIDING" ? "κρυμμένη τροχαία" : "τροχαία")
+            : "ατύχημα";
+          speak(`Προσοχή, ${label} σε ${spokenDist(d)}.`);
+        }
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Ενιαία λίστα: Waze + μηνύματα ομάδων.
+    // ------------------------------------------------------------------
+    function renderAlertList(groupItems, rawCount) {
       const list = $("alertsList");
-      const items = resolved
-        .filter(r => Date.now() - r.t <= ALERT_MAX_AGE)
-        .sort((a, b) => b.t - a.t);
-      if (!items.length) {
+      const entries = [];
+      wazeItems.forEach(a => {
+        const wt = WAZE_TYPES[a.type];
+        entries.push({
+          ico: wt.ico,
+          main: a.subType === "POLICE_HIDING" ? "Κρυμμένη τροχαία" : wt.label,
+          small: ([a.street, a.city].filter(Boolean).join(", ") || "") +
+                 " · Waze · " + wazeAge(a.pubMillis),
+          t: a.pubMillis,
+          go: () => { map.setView([a.location.y, a.location.x], 15);
+                      if (wazeMarkers[a.uuid]) wazeMarkers[a.uuid].openPopup(); },
+        });
+      });
+      groupItems.forEach(r => {
+        entries.push({
+          ico: r.cls.ico, main: r.m,
+          small: r.g + (r.place ? " · " + r.place : ""),
+          t: r.t,
+          go: () => { if (r.coords) { map.setView([r.coords.lat, r.coords.lon], 15);
+                      if (alertMarkers[r.id]) alertMarkers[r.id].marker.openPopup(); } },
+        });
+      });
+      entries.sort((a, b) => b.t - a.t);
+
+      if (!entries.length) {
         list.innerHTML = '<div class="empty">' +
-          `Ελήφθησαν έως τώρα: <b>${rawCount || 0}</b> μηνύματα.<br><br>` +
-          "Διαβάζονται μόνο <b>νέες</b> ειδοποιήσεις — από τη στιγμή που δόθηκε " +
-          "η πρόσβαση και μετά (το Android δεν δίνει τις παλιές).<br><br>" +
-          "Για να πιάνει: οι ομάδες στο Viber να <b>μην είναι σε σίγαση</b> " +
-          "(να έρχονται κανονικά ειδοποιήσεις στην μπάρα), και το Viber να μην " +
-          "είναι ανοιχτό στη συνομιλία εκείνη την ώρα. " +
-          "Αν μόλις έδωσες την άδεια, κάνε μία επανεκκίνηση της εφαρμογής.</div>";
+          (wazeError ? wazeError + "<br><br>" : "Καμία ενεργή αναφορά Waze σε αυτή την περιοχή αυτή τη στιγμή.<br><br>") +
+          `Μηνύματα ομάδων που ελήφθησαν: <b>${rawCount || 0}</b> ` +
+          "(οι ειδοποιήσεις των ομάδων είναι αναξιόπιστες — οι αναφορές Waze " +
+          "είναι πλέον η κύρια πηγή και δουλεύουν παντού, χωρίς καμία ρύθμιση).</div>";
         return;
       }
       list.innerHTML = "";
-      items.forEach(r => {
-        const when = new Date(r.t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
+      entries.forEach(e => {
+        const when = new Date(e.t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
         const div = document.createElement("div");
         div.className = "a";
-        div.innerHTML = `<span class="ai">${r.cls.ico}</span>` +
-          `<span class="am">${r.m}<br><small>${r.g}${r.place ? " · " + r.place : ""}</small></span>` +
+        div.innerHTML = `<span class="ai">${e.ico}</span>` +
+          `<span class="am">${e.main}<br><small>${e.small}</small></span>` +
           `<span class="at">${when}</span>`;
-        div.onclick = () => {
-          if (r.coords) { map.setView([r.coords.lat, r.coords.lon], 15); map.closePopup();
-            if (alertMarkers[r.id]) alertMarkers[r.id].marker.openPopup(); }
-        };
+        div.onclick = e.go;
         list.appendChild(div);
       });
     }
 
-    async function refreshAlerts() {
-      if (!window.AndroidAlerts) return;
-      // Ενημέρωσε το native για τις ομάδες που παρακολουθούμε.
+    async function collectGroupAlerts() {
+      if (!window.AndroidAlerts) return { items: [], raw: 0 };
       try { AndroidAlerts.setGroups(WATCH_GROUPS.join("|")); } catch (e) {}
-
       let raw = [];
       try { raw = JSON.parse(AndroidAlerts.list() || "[]"); } catch (e) { raw = []; }
       const resolved = [], seen = {};
       for (const a of raw) {
         if (Date.now() - a.t > ALERT_MAX_AGE) continue;
         const r = await resolveAlert(a);
-        if (r && !seen[r.id]) {
-          seen[r.id] = true;
-          resolved.push(r);
-          renderAlertMarker(r);
-        }
+        if (r && !seen[r.id]) { seen[r.id] = true; resolved.push(r); renderAlertMarker(r); }
       }
-      renderAlertList(resolved, raw.length);
+      return { items: resolved, raw: raw.length };
+    }
+
+    async function refreshAlerts() {
       updateAlertsEnable();
+      await refreshWaze();
+      const g = await collectGroupAlerts();
+      renderAlertList(g.items, g.raw);
     }
 
     function updateAlertsEnable() {
       const box = $("alertsEnable");
       const has = window.AndroidAlerts && AndroidAlerts.hasAccess && AndroidAlerts.hasAccess();
       if (window.AndroidAlerts && !has) {
-        box.innerHTML = '<button id="alertsGrant">Ενεργοποίηση: δώσε πρόσβαση στις ειδοποιήσεις</button>';
+        box.innerHTML = '<button id="alertsGrant">Προαιρετικό: πρόσβαση ειδοποιήσεων για τις ομάδες</button>';
         $("alertsGrant").onclick = () => AndroidAlerts.openAccessSettings();
-      } else if (!window.AndroidAlerts) {
-        box.innerHTML = '<div class="empty">Διαθέσιμο μόνο στην έκδοση APK (ανάγνωση ειδοποιήσεων Viber).</div>';
       } else {
         box.innerHTML = "";
       }
@@ -1118,11 +1230,18 @@
       try { AndroidAlerts && AndroidAlerts.clear(); } catch (e) {}
       Object.values(alertMarkers).forEach(o => o.marker.remove());
       for (const k in alertMarkers) delete alertMarkers[k];
-      renderAlertList([], 0);
+      refreshAlerts();
     });
 
-    // Περιοδικός έλεγχος για νέες ειδοποιήσεις.
-    setInterval(() => { if (alertsVisible) refreshAlerts(); }, 15000);
+    // Περιοδική ανανέωση: στο panel ή κατά την πλοήγηση.
+    setInterval(() => { if (alertsVisible || nav.active) refreshAlerts(); }, 60000);
+    // Νέα περιοχή στον χάρτη → φρέσκες αναφορές Waze (με μικρή καθυστέρηση).
+    let wazeMoveTimer = null;
+    map.on("moveend", () => {
+      if (!alertsVisible && !nav.active) return;
+      clearTimeout(wazeMoveTimer);
+      wazeMoveTimer = setTimeout(refreshAlerts, 1200);
+    });
   </script>
 </body>
 </html>

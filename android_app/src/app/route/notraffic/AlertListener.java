@@ -36,6 +36,13 @@ public class AlertListener extends NotificationListenerService {
                 .replaceAll("\\p{M}", "").toLowerCase();
     }
 
+    /** Viber service/teaser notifications — not real group messages. */
+    static boolean isNoise(String normText) {
+        return normText.matches(".*(δειτε .{0,20}μηνυμα|ισως χασατε|νεα μηνυματα"
+                + "|αναπαντητη|missed call|new message|σας καλει|calling"
+                + "|εγινε μελος|joined|reacted|αντεδρασε).*");
+    }
+
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         try {
@@ -86,10 +93,11 @@ public class AlertListener extends NotificationListenerService {
             long now = System.currentTimeMillis();
             for (String text : texts) {
                 if (text.isEmpty()) continue;
+                String ntext = norm(text);
+                if (isNoise(ntext)) continue;  // teaser, όχι πραγματικό μήνυμα
                 // Dedupe: Viber re-posts the same message in summary
                 // notifications; skip if we already stored this exact text.
                 boolean dup = false;
-                String ntext = norm(text);
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject it = arr.getJSONObject(i);
                     if (norm(it.optString("m")).equals(ntext)) { dup = true; break; }

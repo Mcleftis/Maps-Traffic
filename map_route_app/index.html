@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Route Planner — No Real-Time Traffic</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+    #panel {
+      padding: 12px;
+      background: #fff;
+      box-shadow: 0 2px 6px rgba(0,0,0,.25);
+      z-index: 5;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #panel input {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 15px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+    }
+    #panel button {
+      padding: 10px 12px;
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      background: #1a73e8;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #panel button:disabled { background: #9cbcf0; cursor: wait; }
+
+    #result {
+      font-size: 14px;
+      color: #333;
+      min-height: 18px;
+    }
+    #result .badge {
+      display: inline-block;
+      background: #e6f4ea;
+      color: #137333;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-left: 6px;
+    }
+    #result .error { color: #c5221f; }
+
+    #map { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="panel">
+      <input id="origin" type="text" placeholder="Origin (e.g. Syntagma Square, Athens)">
+      <input id="destination" type="text" placeholder="Destination (e.g. Thessaloniki)">
+      <button id="go" onclick="calculateRoute()">Calculate route (traffic ignored)</button>
+      <div id="result"></div>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script>
+    // ======================================================================
+    // CONFIG — put your own key here.
+    // The key needs these APIs enabled in Google Cloud Console:
+    //   1. Maps JavaScript API   (map display + autocomplete + geocoding)
+    //   2. Routes API            (route calculation)
+    //   3. Places API            (autocomplete suggestions)
+    // ======================================================================
+    const API_KEY = "YOUR_GOOGLE_MAPS_API_KEY";
+
+    let map, routePolyline, originMarker, destMarker;
+    let originAutocomplete, destAutocomplete;
+
+    function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: 38.0, lng: 23.7 }, // Greece
+        zoom: 7,
+        // NOTE: we deliberately do NOT add a google.maps.TrafficLayer(),
+        // so no live-traffic colors are ever painted on the map either.
+      });
+
+      const opts = { fields: ["geometry", "formatted_address"] };
+      originAutocomplete = new google.maps.places.Autocomplete(
+        document.getElementById("origin"), opts);
+      destAutocomplete = new google.maps.places.Autocomplete(
+        document.getElementById("destination"), opts);
+    }
+
+    // Resolve a text input (or autocomplete pick) to lat/lng.
+    async function resolvePlace(autocomplete, inputEl) {
+      const place = autocomplete.getPlace();
+      if (place && place.geometry && place.geometry.location) {
+        return {
+          latitude: place.geometry.location.lat(),
+          longitude: place.geometry.location.lng(),
+        };
+      }
+      // Fall back to geocoding whatever was typed.
+      const geocoder = new google.maps.Geocoder();
+      const { results } = await geocoder.geocode({ address: inputEl.value });
+      const loc = results[0].geometry.location;
+      return { latitude: loc.lat(), longitude: loc.lng() };
+    }
+
+    async function calculateRoute() {
+      const btn = document.getElementById("go");
+      const resultEl = document.getElementById("result");
+      btn.disabled = true;
+      resultEl.textContent = "Calculating…";
+
+      try {
+        const origin = await resolvePlace(
+          originAutocomplete, document.getElementById("origin"));
+        const destination = await resolvePlace(
+          destAutocomplete, document.getElementById("destination"));
+
+        // ==================================================================
+        // THE KEY PART — Routes API computeRoutes with TRAFFIC_UNAWARE.
+        //
+        //   routingPreference: "TRAFFIC_UNAWARE"
+        //
+        // This tells Google to compute the route using only static road
+        // data (speed limits, road types, historical-free travel times)
+        // and to completely ignore real-time traffic conditions.
+        // We also do NOT send a departureTime, which is what would
+        // otherwise anchor a traffic snapshot.
+        //
+        // The other possible values (for reference) are:
+        //   "TRAFFIC_AWARE"          — uses live traffic
+        //   "TRAFFIC_AWARE_OPTIMAL"  — uses live traffic, highest quality
+        // ==================================================================
+        const body = {
+          origin:      { location: { latLng: origin } },
+          destination: { location: { latLng: destination } },
+          travelMode: "DRIVE",
+          routingPreference: "TRAFFIC_UNAWARE",
+          polylineEncoding: "ENCODED_POLYLINE",
+          units: "METRIC",
+        };
+
+        const resp = await fetch(
+          "https://routes.googleapis.com/directions/v2:computeRoutes",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Goog-Api-Key": API_KEY,
+              // FieldMask is mandatory for the Routes API — request only
+              // what we need (keeps the call cheap and fast).
+              "X-Goog-FieldMask":
+                "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline",
+            },
+            body: JSON.stringify(body),
+          });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error?.message || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        if (!data.routes || !data.routes.length) {
+          throw new Error("No route found between these points.");
+        }
+        drawRoute(data.routes[0], origin, destination, resultEl);
+      } catch (e) {
+        resultEl.innerHTML = `<span class="error">Error: ${e.message}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function drawRoute(route, origin, destination, resultEl) {
+      // Clear previous route.
+      if (routePolyline) routePolyline.setMap(null);
+      if (originMarker) originMarker.setMap(null);
+      if (destMarker) destMarker.setMap(null);
+
+      // Decode the polyline returned by the Routes API and draw it.
+      const path = google.maps.geometry.encoding.decodePath(
+        route.polyline.encodedPolyline);
+
+      routePolyline = new google.maps.Polyline({
+        path,
+        strokeColor: "#1a73e8",
+        strokeOpacity: 0.9,
+        strokeWeight: 5,
+        map,
+      });
+
+      originMarker = new google.maps.Marker({
+        position: { lat: origin.latitude, lng: origin.longitude },
+        label: "A", map,
+      });
+      destMarker = new google.maps.Marker({
+        position: { lat: destination.latitude, lng: destination.longitude },
+        label: "B", map,
+      });
+
+      // Fit the map to the route.
+      const bounds = new google.maps.LatLngBounds();
+      path.forEach(p => bounds.extend(p));
+      map.fitBounds(bounds, 40);
+
+      // Show distance + duration. Duration comes as e.g. "13502s".
+      const km = (route.distanceMeters / 1000).toFixed(1);
+      const totalSec = parseInt(route.duration, 10);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.round((totalSec % 3600) / 60);
+      const dur = h > 0 ? `${h} h ${m} min` : `${m} min`;
+
+      resultEl.innerHTML =
+        `<strong>${km} km</strong> · ${dur}` +
+        `<span class="badge">traffic ignored</span>`;
+    }
+
+    // Expose initMap for the Maps JS API callback.
+    window.initMap = initMap;
+  </script>
+
+  <!-- Maps JavaScript API loader. `geometry` is needed to decode the
+       polyline, `places` for the autocomplete boxes. -->
+  <script async
+    src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=geometry,places&callback=initMap">
+  </script>
+</body>
+</html>

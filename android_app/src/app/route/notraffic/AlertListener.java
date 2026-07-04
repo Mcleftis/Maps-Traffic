@@ -22,7 +22,6 @@ import java.util.ArrayList;
  */
 public class AlertListener extends NotificationListenerService {
 
-    static final String PKG_VIBER = "com.viber.voip";
     static final String PREFS = "alerts";
     static final String KEY_ITEMS = "items";
     static final String KEY_GROUPS = "groups";       // '|'-separated group names
@@ -46,27 +45,39 @@ public class AlertListener extends NotificationListenerService {
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         try {
-            if (sbn == null || !PKG_VIBER.equals(sbn.getPackageName())) return;
+            // Any messaging app — the group-name filter below decides what
+            // matters. (The groups may live on Telegram/WhatsApp/Viber/...)
+            if (sbn == null) return;
+            String pkg = sbn.getPackageName();
+            if (pkg == null || pkg.equals(getPackageName())
+                    || pkg.equals("android") || pkg.equals("com.android.systemui"))
+                return;
             Notification n = sbn.getNotification();
             if (n == null || n.extras == null) return;
             Bundle ex = n.extras;
 
             CharSequence titleCs = ex.getCharSequence(Notification.EXTRA_TITLE);
             String title = titleCs == null ? "" : titleCs.toString().trim();
+            // Some apps put the group name in the sub/conversation title
+            // ("Sender @ Group") — match against all of them.
+            CharSequence subCs = ex.getCharSequence(Notification.EXTRA_SUB_TEXT);
+            CharSequence convCs = ex.getCharSequence("android.conversationTitle");
+            String haystack = title
+                    + " " + (subCs == null ? "" : subCs)
+                    + " " + (convCs == null ? "" : convCs);
 
             SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
 
             // Keep only the configured groups (accent/case-insensitive match).
             String groups = sp.getString(KEY_GROUPS, "");
-            if (!groups.isEmpty()) {
-                boolean match = false;
-                String nt = norm(title);
-                for (String g : groups.split("\\|")) {
-                    g = norm(g.trim());
-                    if (!g.isEmpty() && nt.contains(g)) { match = true; break; }
-                }
-                if (!match) return;
+            boolean match = false;
+            String nt = norm(haystack);
+            for (String g : groups.split("\\|")) {
+                g = norm(g.trim());
+                if (!g.isEmpty() && nt.contains(g)) { match = true; break; }
             }
+            if (!match) return;
+            if (convCs != null && convCs.length() > 0) title = convCs.toString().trim();
 
             // Collect every text this notification carries: plain text,
             // big text, and the stacked InboxStyle lines Viber uses when
@@ -82,6 +93,20 @@ public class AlertListener extends NotificationListenerService {
             if (lines != null) {
                 for (CharSequence l : lines) {
                     if (l != null && l.length() > 0) texts.add(l.toString().trim());
+                }
+            }
+            // MessagingStyle (Telegram/WhatsApp): per-message bundles.
+            android.os.Parcelable[] msgs =
+                    ex.getParcelableArray(Notification.EXTRA_MESSAGES);
+            if (msgs != null) {
+                for (android.os.Parcelable p : msgs) {
+                    if (!(p instanceof Bundle)) continue;
+                    Bundle b = (Bundle) p;
+                    CharSequence mt = b.getCharSequence("text");
+                    if (mt == null || mt.length() == 0) continue;
+                    CharSequence sender = b.getCharSequence("sender");
+                    texts.add((sender != null && sender.length() > 0
+                            ? sender + ": " : "") + mt.toString().trim());
                 }
             }
             if (texts.isEmpty()) return;

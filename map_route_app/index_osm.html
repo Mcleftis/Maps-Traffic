@@ -1167,9 +1167,9 @@
       if (!entries.length) {
         list.innerHTML = '<div class="empty">' +
           (wazeError ? wazeError + "<br><br>" : "Καμία ενεργή αναφορά Waze σε αυτή την περιοχή αυτή τη στιγμή.<br><br>") +
-          `Μηνύματα ομάδων που ελήφθησαν: <b>${rawCount || 0}</b> ` +
-          "(οι ειδοποιήσεις των ομάδων είναι αναξιόπιστες — οι αναφορές Waze " +
-          "είναι πλέον η κύρια πηγή και δουλεύουν παντού, χωρίς καμία ρύθμιση).</div>";
+          `Μηνύματα ομάδων που διαβάστηκαν: <b>${rawCount || 0}</b>.<br>` +
+          "Ενεργοποίησε το «📖 Διάβασμα ομάδων» πιο πάνω και <b>άνοιξε την ομάδα</b> " +
+          "στην εφαρμογή της — δεν χρειάζεται να έρχονται ειδοποιήσεις.</div>";
         return;
       }
       list.innerHTML = "";
@@ -1208,13 +1208,17 @@
 
     function updateAlertsEnable() {
       const box = $("alertsEnable");
-      const has = window.AndroidAlerts && AndroidAlerts.hasAccess && AndroidAlerts.hasAccess();
-      if (window.AndroidAlerts && !has) {
-        box.innerHTML = '<button id="alertsGrant">Προαιρετικό: πρόσβαση ειδοποιήσεων για τις ομάδες</button>';
-        $("alertsGrant").onclick = () => AndroidAlerts.openAccessSettings();
+      if (!window.AndroidAlerts) { box.innerHTML = ""; return; }
+      const reader = AndroidAlerts.hasReader && AndroidAlerts.hasReader();
+      let html = "";
+      if (!reader) {
+        html += '<button id="readerGrant">📖 Διάβασμα ομάδων απευθείας από την οθόνη (συνιστάται)</button>' +
+          '<div class="empty">Δεν εξαρτάται από ειδοποιήσεις: ενεργοποίησέ το και μετά <b>άνοιξε την ομάδα</b> στην εφαρμογή της για να διαβαστούν τα μηνύματα.</div>';
       } else {
-        box.innerHTML = "";
+        html += '<div class="empty">📖 Ενεργό. Άνοιξε την ομάδα (Θεσσαλονίκη Αλερτ / Δρακουμέλ) και τα μηνύματα θα μπαίνουν εδώ αυτόματα.</div>';
       }
+      box.innerHTML = html;
+      if (!reader) $("readerGrant").onclick = () => AndroidAlerts.openReaderSettings();
     }
 
     $("alertsBtn").addEventListener("click", () => {

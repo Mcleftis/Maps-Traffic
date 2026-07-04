@@ -184,6 +184,25 @@ public class MainActivity extends Activity {
             }
         }
 
+        // ---- Accessibility reader (reads the open chat from the screen) ----
+        @JavascriptInterface
+        public boolean hasReader() {
+            String enabled = Settings.Secure.getString(getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return enabled != null && enabled.contains(getPackageName());
+        }
+
+        @JavascriptInterface
+        public void openReaderSettings() {
+            try {
+                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                try { startActivity(new Intent(Settings.ACTION_SETTINGS)); }
+                catch (Exception ignored) { }
+            }
+        }
+
         @JavascriptInterface
         public void clear() {
             getSharedPreferences(AlertListener.PREFS, MODE_PRIVATE).edit()

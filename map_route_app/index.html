@@ -86,9 +86,12 @@
       map = new google.maps.Map(document.getElementById("map"), {
         center: { lat: 38.0, lng: 23.7 }, // Greece
         zoom: 7,
-        // NOTE: we deliberately do NOT add a google.maps.TrafficLayer(),
-        // so no live-traffic colors are ever painted on the map either.
       });
+
+      // Live traffic overlay — Google's own real-time traffic colours.
+      // NOTE: routing above still uses TRAFFIC_UNAWARE; this layer only
+      // *shows* traffic, it does not change the computed route.
+      new google.maps.TrafficLayer().setMap(map);
 
       const opts = { fields: ["geometry", "formatted_address"] };
       originAutocomplete = new google.maps.places.Autocomplete(

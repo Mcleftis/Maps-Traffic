@@ -99,6 +99,13 @@
     }
     #navStop { background: #fce8e6 !important; color: #c5221f; font-weight: 700; }
 
+    .traffic-legend {
+      background: #fff; padding: 6px 9px; border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.3); font-size: 12px; line-height: 1.5;
+    }
+    .traffic-legend div { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+    .traffic-legend i { width: 16px; height: 6px; border-radius: 2px; flex: none; }
+
     #recenterBtn {
       display: none; position: absolute; right: 12px; bottom: 78px; z-index: 1600;
       width: 50px; height: 50px; border-radius: 50%; border: none;
@@ -181,6 +188,15 @@
     const PHOTON = "https://photon.komoot.io/api/";
     const NOMINATIM = "https://nominatim.openstreetmap.org";
 
+    // ====================================================================
+    // ΖΩΝΤΑΝΗ ΚΙΝΗΣΗ — TomTom Traffic Flow tiles.
+    // Δεν υπάρχει ΚΑΝΕΝΑ δωρεάν, χωρίς-κλειδί, παγκόσμιο traffic layer:
+    // τα δεδομένα κίνησης τα μαζεύουν εταιρείες και θέλουν API key.
+    // Το TomTom δίνει ΔΩΡΕΑΝ κλειδί, ΧΩΡΙΣ πιστωτική κάρτα, εδώ:
+    //   https://developer.tomtom.com/  →  Register  →  My Dashboard  →  Keys
+    // Κόλλα το κλειδί σου εδώ και η κίνηση εμφανίζεται παντού:
+    const TRAFFIC_KEY = "YOUR_TOMTOM_KEY";
+
     // ---- Χάρτης + layers -----------------------------------------------
     const map = L.map("map", { zoomControl: true }).setView([38.0, 23.7], 7);
     const osmLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -191,10 +207,46 @@
       "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       maxZoom: 19, attribution: "Tiles &copy; Esri",
     });
+
+    // Traffic overlay (πάνω από τον χάρτη): κόκκινο=μποτιλιάρισμα, πράσινο=ελεύθερα.
+    const trafficReady = TRAFFIC_KEY && TRAFFIC_KEY.indexOf("YOUR_") !== 0;
+    const trafficLayer = L.tileLayer(
+      "https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=" + TRAFFIC_KEY,
+      { maxZoom: 22, opacity: 0.85, zIndex: 400,
+        attribution: 'Κίνηση &copy; <a href="https://www.tomtom.com">TomTom</a>' }
+    );
+
     L.control.layers(
-      { "Χάρτης": osmLayer, "Δορυφόρος": satLayer }, null, { position: "topright" }
+      { "Χάρτης": osmLayer, "Δορυφόρος": satLayer },
+      { "🚦 Κίνηση (ζωντανά)": trafficLayer },
+      { position: "topright", collapsed: false }
     ).addTo(map);
     L.control.scale({ metric: true, imperial: false }).addTo(map);
+
+    // Υπόμνημα χρωμάτων κίνησης (εμφανίζεται όταν το layer είναι ενεργό).
+    const trafficLegend = L.control({ position: "bottomleft" });
+    trafficLegend.onAdd = () => {
+      const d = L.DomUtil.create("div", "traffic-legend");
+      d.innerHTML = "<b>🚦 Κίνηση</b>" +
+        '<div><i style="background:#2f9e44"></i>Ελεύθερα</div>' +
+        '<div><i style="background:#f59f00"></i>Πυκνή</div>' +
+        '<div><i style="background:#e03131"></i>Μποτιλιάρισμα</div>';
+      return d;
+    };
+    let trafficWarned = false;
+    function warnTrafficKey() {
+      if (trafficWarned) return; trafficWarned = true;
+      $("result").innerHTML = '<span class="error">Για ζωντανή κίνηση χρειάζεται ' +
+        'δωρεάν κλειδί TomTom (δες οδηγίες στο README).</span>';
+    }
+    trafficLayer.on("tileerror", warnTrafficKey);
+    map.on("overlayadd", e => {
+      if (e.layer === trafficLayer) { trafficLegend.addTo(map); if (!trafficReady) warnTrafficKey(); }
+    });
+    map.on("overlayremove", e => { if (e.layer === trafficLayer) map.removeControl(trafficLegend); });
+
+    // Αν υπάρχει κλειδί, δείξε την κίνηση αμέσως, παντού.
+    if (trafficReady) { trafficLayer.addTo(map); trafficLegend.addTo(map); }
 
     // ---- Κατάσταση -------------------------------------------------------
     let origin = null, dest = null;      // {lat, lon}

@@ -34,7 +34,25 @@ Two extra details make it "strict":
 | `index_osm.html` | **No-API-key version** (OpenStreetMap + Leaflet + OSRM). OSRM routes on static OSM road data only — it has no access to live traffic at all, so it is traffic-free by construction. Just open the file in any browser. |
 | `route_no_traffic.py` | Command-line version: geocodes two addresses and prints distance/duration computed with `TRAFFIC_UNAWARE`. |
 
-## Setup (once)
+## Live traffic (`index_osm.html` / the APK)
+
+Map tiles and routing are free and keyless, but **live traffic data is not** —
+there is no free, keyless, global traffic layer anywhere (Google, TomTom and
+HERE all require a key). `index_osm.html` uses **TomTom Traffic Flow tiles**,
+whose free tier needs **no credit card**:
+
+1. Register at <https://developer.tomtom.com/> (free).
+2. **My Dashboard → Keys** — copy your default key.
+3. In `index_osm.html`, replace `YOUR_TOMTOM_KEY` in the `TRAFFIC_KEY`
+   constant (one place). For the APK, rebuild with `android_app/build.sh`.
+
+The 🚦 traffic overlay then shows on the map (green = clear, orange = heavy,
+red = jam) and can be toggled from the layers control (top-right). Routing
+stays traffic-free; the overlay only *shows* congestion. The **Google
+version** (`index.html`) instead uses Google's own `TrafficLayer`, which
+turns on automatically once its Google key is set.
+
+## Setup (once) — Google version
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/), create a
    project, and enable billing (Google gives a large free monthly quota).

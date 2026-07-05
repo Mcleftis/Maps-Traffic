@@ -196,7 +196,7 @@
       <div id="steps"></div>
       <div id="alertsPanel">
         <div id="alertsHead">
-          <span>🚨 Ζωντανές αναφορές (Waze + ομάδες)</span>
+          <span>🚦 Κίνηση & περιστατικά (TomTom)</span>
           <button id="alertsClear" title="Καθαρισμός">🗑️</button>
         </div>
         <div id="alertsEnable"></div>
@@ -897,7 +897,8 @@
       // Σβήσε το κομμάτι που ήδη διανύθηκε — κράτα ορατό μόνο το μπροστά.
       if (!nav.recalcing && routeLines.length) trimRouteAhead(snap.along);
 
-      // Φωνητική προειδοποίηση για τροχαία/ατύχημα (Waze) κοντά σου.
+      // Φωνητική προειδοποίηση για περιστατικά κίνησης / τροχαία κοντά σου.
+      warnNearbyTomTom(p);
       warnNearbyWaze(p);
 
       // Άφιξη;
@@ -1136,11 +1137,127 @@
     }
 
     // ------------------------------------------------------------------
-    // Ενιαία λίστα: Waze + μηνύματα ομάδων.
+    // TOMTOM TRAFFIC INCIDENTS — δομημένα περιστατικά κίνησης (ατυχήματα,
+    // κλειστοί δρόμοι, έργα, μποτιλιαρίσματα) με ακριβείς συντεταγμένες.
+    // Χρησιμοποιεί το ΙΔΙΟ κλειδί TomTom με το overlay κίνησης.
+    // ------------------------------------------------------------------
+    // iconCategory → εικονίδιο + ελληνική ετικέτα.
+    const TT_CAT = {
+      0: { ico: "⚠️", label: "Συμβάν" },
+      1: { ico: "💥", label: "Ατύχημα" },
+      2: { ico: "🌫️", label: "Ομίχλη" },
+      3: { ico: "⚠️", label: "Επικίνδυνες συνθήκες" },
+      4: { ico: "🌧️", label: "Βροχή" },
+      5: { ico: "🧊", label: "Πάγος" },
+      6: { ico: "🚗", label: "Μποτιλιάρισμα" },
+      7: { ico: "🚧", label: "Κλειστή λωρίδα" },
+      8: { ico: "⛔", label: "Κλειστός δρόμος" },
+      9: { ico: "🚧", label: "Έργα στον δρόμο" },
+      10: { ico: "💨", label: "Άνεμος" },
+      11: { ico: "🌊", label: "Πλημμύρα" },
+      14: { ico: "🚗", label: "Ακινητοποιημένο όχημα" },
+    };
+    let tomtomItems = [];
+    const tomtomMarkers = {};
+    const tomtomAnnounced = {};
+    let tomtomError = "";
+
+    function ttFirstCoord(geom) {
+      if (!geom || !geom.coordinates) return null;
+      let c = geom.coordinates;
+      while (Array.isArray(c[0])) c = c[0];   // Point → [lon,lat], Line → [[..]]
+      return { lat: c[1], lon: c[0] };
+    }
+
+    async function refreshTomTom() {
+      if (!trafficReady) { tomtomError = ""; tomtomItems = []; return; }
+      const b = map.getBounds();
+      if (b.getNorth() - b.getSouth() > 2 || b.getEast() - b.getWest() > 2.5) {
+        tomtomError = "Κάνε ζουμ πιο κοντά για τα περιστατικά κίνησης.";
+        return;
+      }
+      const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+      const fields = encodeURIComponent(
+        "{incidents{type,geometry{type,coordinates},properties{iconCategory," +
+        "magnitudeOfDelay,events{description,iconCategory},startTime,from,to,delay,roadNumbers}}}");
+      const url = "https://api.tomtom.com/traffic/services/5/incidentDetails" +
+        `?key=${TRAFFIC_KEY}&bbox=${bbox}&fields=${fields}` +
+        "&language=el-GR&timeValidityFilter=present";
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const data = await resp.json();
+        tomtomError = "";
+        renderTomTom(data.incidents || []);
+      } catch (e) {
+        tomtomError = "TomTom: αποτυχία λήψης (" + e.message + ")";
+      }
+    }
+
+    function ttIncident(inc) {
+      const pr = inc.properties || {};
+      const cat = TT_CAT[pr.iconCategory] || TT_CAT[0];
+      const ev = (pr.events && pr.events[0] && pr.events[0].description) || cat.label;
+      const road = (pr.roadNumbers && pr.roadNumbers[0]) ? pr.roadNumbers[0] + " · " : "";
+      const where = [pr.from, pr.to].filter(Boolean).join(" → ");
+      const coord = ttFirstCoord(inc.geometry);
+      const id = pr.iconCategory + "|" + (coord ? coord.lat.toFixed(4) + "," + coord.lon.toFixed(4) : ev);
+      const t = pr.startTime ? Date.parse(pr.startTime) : Date.now();
+      return { id, cat, ev, road, where, coord, t, delay: pr.delay || 0 };
+    }
+
+    function renderTomTom(incidents) {
+      const parsed = incidents.map(ttIncident).filter(i => i.coord);
+      tomtomItems = parsed;
+      const live = {};
+      parsed.forEach(i => {
+        live[i.id] = true;
+        if (tomtomMarkers[i.id]) return;
+        const m = L.marker([i.coord.lat, i.coord.lon], {
+          icon: L.divIcon({ className: "", html: `<div class="alert-pin">${i.cat.ico}</div>`,
+            iconSize: [26, 26], iconAnchor: [13, 13] }),
+          zIndexOffset: 1300,
+        });
+        const delayTxt = i.delay ? ` · καθυστ. ${Math.round(i.delay / 60)} λεπ` : "";
+        m.bindPopup(`<b>${i.cat.ico} ${i.cat.label}</b><br>${i.road}${i.ev}<br>` +
+          `<small>${i.where || "—"} · TomTom${delayTxt}</small>`);
+        m.addTo(alertLayer);
+        tomtomMarkers[i.id] = m;
+      });
+      for (const id in tomtomMarkers) {
+        if (!live[id]) { tomtomMarkers[id].remove(); delete tomtomMarkers[id]; }
+      }
+    }
+
+    // Φωνητική προειδοποίηση για ατύχημα/κλειστό δρόμο/μποτιλιάρισμα κοντά.
+    const TT_WARN = [TT_CAT[1], TT_CAT[8], TT_CAT[6]];
+    function warnNearbyTomTom(p) {
+      for (const i of tomtomItems) {
+        if (!TT_WARN.includes(i.cat) || tomtomAnnounced[i.id]) continue;
+        const d = havDist(p, [i.coord.lat, i.coord.lon]);
+        if (d < 700) {
+          tomtomAnnounced[i.id] = true;
+          speak(`Προσοχή, ${i.cat.label.toLowerCase()} σε ${spokenDist(d)}.`);
+        }
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Ενιαία λίστα: TomTom περιστατικά + Waze + μηνύματα ομάδων.
     // ------------------------------------------------------------------
     function renderAlertList(groupItems, rawCount) {
       const list = $("alertsList");
       const entries = [];
+      tomtomItems.forEach(i => {
+        entries.push({
+          ico: i.cat.ico, main: (i.road ? i.road : "") + i.ev,
+          small: (i.where || i.cat.label) + " · TomTom" +
+                 (i.delay ? " · καθυστ. " + Math.round(i.delay / 60) + " λεπ" : ""),
+          t: i.t,
+          go: () => { map.setView([i.coord.lat, i.coord.lon], 15);
+                      if (tomtomMarkers[i.id]) tomtomMarkers[i.id].openPopup(); },
+        });
+      });
       wazeItems.forEach(a => {
         const wt = WAZE_TYPES[a.type];
         entries.push({
@@ -1165,11 +1282,18 @@
       entries.sort((a, b) => b.t - a.t);
 
       if (!entries.length) {
-        list.innerHTML = '<div class="empty">' +
-          (wazeError ? wazeError + "<br><br>" : "Καμία ενεργή αναφορά Waze σε αυτή την περιοχή αυτή τη στιγμή.<br><br>") +
-          `Μηνύματα ομάδων που διαβάστηκαν: <b>${rawCount || 0}</b>.<br>` +
-          "Ενεργοποίησε το «📖 Διάβασμα ομάδων» πιο πάνω και <b>άνοιξε την ομάδα</b> " +
-          "στην εφαρμογή της — δεν χρειάζεται να έρχονται ειδοποιήσεις.</div>";
+        let msg;
+        if (!trafficReady) {
+          msg = "Για τα ζωντανά περιστατικά κίνησης (TomTom) χρειάζεται ένα " +
+            "δωρεάν κλειδί TomTom — δες το README. Χωρίς κλειδί δείχνονται μόνο " +
+            "οι δωρεάν αναφορές Waze.";
+        } else {
+          msg = (tomtomError ? tomtomError + "<br><br>" : "") +
+            (wazeError ? wazeError + "<br><br>" : "") +
+            "Καμία ενεργή αναφορά κίνησης σε αυτή την περιοχή αυτή τη στιγμή. " +
+            "Κάνε ζουμ σε πόλη/αυτοκινητόδρομο.";
+        }
+        list.innerHTML = '<div class="empty">' + msg + "</div>";
         return;
       }
       list.innerHTML = "";
@@ -1201,24 +1325,17 @@
 
     async function refreshAlerts() {
       updateAlertsEnable();
-      await refreshWaze();
+      await Promise.all([refreshTomTom(), refreshWaze()]);
       const g = await collectGroupAlerts();
       renderAlertList(g.items, g.raw);
     }
 
     function updateAlertsEnable() {
       const box = $("alertsEnable");
-      if (!window.AndroidAlerts) { box.innerHTML = ""; return; }
-      const reader = AndroidAlerts.hasReader && AndroidAlerts.hasReader();
-      let html = "";
-      if (!reader) {
-        html += '<button id="readerGrant">📖 Διάβασμα ομάδων απευθείας από την οθόνη (συνιστάται)</button>' +
-          '<div class="empty">Δεν εξαρτάται από ειδοποιήσεις: ενεργοποίησέ το και μετά <b>άνοιξε την ομάδα</b> στην εφαρμογή της για να διαβαστούν τα μηνύματα.</div>';
-      } else {
-        html += '<div class="empty">📖 Ενεργό. Άνοιξε την ομάδα (Θεσσαλονίκη Αλερτ / Δρακουμέλ) και τα μηνύματα θα μπαίνουν εδώ αυτόματα.</div>';
-      }
-      box.innerHTML = html;
-      if (!reader) $("readerGrant").onclick = () => AndroidAlerts.openReaderSettings();
+      if (trafficReady) { box.innerHTML = ""; return; }
+      box.innerHTML = '<div class="empty">🚦 Δώσε το δωρεάν κλειδί TomTom (στο <b>index_osm.html</b>, ' +
+        "μεταβλητή <b>TRAFFIC_KEY</b>) για ζωντανά περιστατικά κίνησης — ατυχήματα, " +
+        "κλειστούς δρόμους, μποτιλιαρίσματα. Οι αναφορές Waze δουλεύουν ούτως ή άλλως.</div>";
     }
 
     $("alertsBtn").addEventListener("click", () => {

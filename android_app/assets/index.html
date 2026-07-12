@@ -878,21 +878,29 @@
 
       const snap = snapToRoute(p);
 
-      // Εκτός διαδρομής; (3 συνεχόμενα στίγματα > 40 m μακριά)
-      if (snap.off > 40) {
-        nav.offCount++;
-        if (nav.offCount >= 3 && !nav.recalcing) {
-          nav.recalcing = true;
-          $("navText").textContent = "Επαναϋπολογισμός διαδρομής…";
-          speak("Επαναϋπολογισμός διαδρομής.");
-          origin = { lat: p[0], lon: p[1] };
-          placeMarker("A", origin);
-          calculateRoute().finally(() => { nav.recalcing = false; nav.offCount = 0; });
-          return;
-        }
-      } else {
+      // ---- Εκτός διαδρομής → επαναϋπολογισμός (σαν Google Maps) ----------
+      // Σκάει ΑΜΕΣΩΣ αν είσαι >90 m μακριά (σαφώς άλλος δρόμος), αλλιώς
+      // μετά από 2 συνεχόμενα στίγματα >40 m. Cooldown 6 δλ για να μην
+      // μπει σε βρόχο αν το GPS χοροπηδάει.
+      const nowMs = Date.now();
+      if (snap.off > 40) nav.offCount++; else nav.offCount = 0;
+      const canReroute = !nav.recalcing && (nowMs - (nav.lastReroute || 0) > 6000);
+      if (canReroute && (snap.off > 90 || nav.offCount >= 2)) {
+        nav.recalcing = true;
+        nav.lastReroute = nowMs;
         nav.offCount = 0;
+        $("navIco").textContent = "↻";
+        $("navDist").textContent = "";
+        $("navText").textContent = "Εκτός διαδρομής — επαναϋπολογισμός…";
+        speak("Επαναϋπολογισμός διαδρομής.");
+        origin = { lat: p[0], lon: p[1] };
+        placeMarker("A", origin);
+        calculateRoute()
+          .catch(() => {})
+          .finally(() => { nav.recalcing = false; nav.offCount = 0; });
+        return;
       }
+      if (nav.recalcing) return;         // περίμενε να έρθει η νέα διαδρομή
 
       // Σβήσε το κομμάτι που ήδη διανύθηκε — κράτα ορατό μόνο το μπροστά.
       if (!nav.recalcing && routeLines.length) trimRouteAhead(snap.along);

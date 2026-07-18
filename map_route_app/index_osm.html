@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Διαδρομή χωρίς κίνηση</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="leaflet/leaflet.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -221,7 +221,7 @@
     </div>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="leaflet/leaflet.js"></script>
   <script>
     // ====================================================================
     // Διαδρομές ΧΩΡΙΣ real-time κίνηση: OSRM (routing.openstreetmap.de)
@@ -247,6 +247,8 @@
     const TRAFFIC_KEY = "YOUR_TOMTOM_KEY";
 
     // ---- Χάρτης + layers -----------------------------------------------
+    // Τοπικά εικονίδια δεικτών (bundled Leaflet — χωρίς CDN).
+    L.Icon.Default.imagePath = "leaflet/images/";
     // preferCanvas: σχεδίαση διαδρομής/δεικτών σε canvas (πιο γρήγορο render).
     const map = L.map("map", { zoomControl: true, preferCanvas: true }).setView([38.0, 23.7], 7);
     const osmLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -304,7 +306,7 @@
     let routeLines = [];                 // [{line, route}]
     let activeIdx = 0;
     let mode = "car";
-    let followMode = true, programmaticMove = false;
+    let followMode = true, suppressAutoUntil = 0;
 
     const $ = id => document.getElementById(id);
     const resultEl = $("result"), stepsEl = $("steps"), stepsToggle = $("stepsToggle");
@@ -633,12 +635,21 @@
       $("recenterBtn").style.display = on ? "none" : "flex";
     }
     function recenterMap(p, zoom) {
-      programmaticMove = true;           // να μη μετρήσει ως ενέργεια χρήστη
-      map.setView(p, zoom != null ? zoom : map.getZoom(), { animate: true });
+      // Παράθυρο 800ms όπου οι δικές μας κινήσεις ΔΕΝ μετρούν ως χρήστης
+      // (πιο αξιόπιστο από flag που καθαρίζει το moveend σε συνεχή animations).
+      suppressAutoUntil = Date.now() + 800;
+      map.setView(p, zoom != null ? zoom : map.getZoom(),
+        { animate: true, duration: 0.5 });
     }
-    map.on("moveend", () => { programmaticMove = false; });
-    map.on("dragstart", () => { if (nav.active) setFollow(false); });
-    map.on("zoomstart", () => { if (nav.active && !programmaticMove) setFollow(false); });
+    // Μόνο πραγματικές χειρονομίες (σύρσιμο/pinch) ξεκλειδώνουν το follow.
+    map.on("dragstart", () => { if (nav.active && Date.now() > suppressAutoUntil) setFollow(false); });
+    map.on("zoomstart", () => { if (nav.active && Date.now() > suppressAutoUntil) setFollow(false); });
+    // Αλλαγή μεγέθους (PiP, περιστροφή, πληκτρολόγιο) → ενημέρωσε τον χάρτη
+    // και κράτα τον κεντραρισμένο στη θέση μας αν είμαστε σε follow.
+    window.addEventListener("resize", () => {
+      map.invalidateSize();
+      if (nav.active && followMode && nav.lastPos) recenterMap(nav.lastPos);
+    });
     $("recenterBtn").addEventListener("click", () => {
       setFollow(true);
       if (nav.lastPos) recenterMap(nav.lastPos, 16);
@@ -646,7 +657,7 @@
     $("navOverview").addEventListener("click", () => {
       if (!routeLines.length) return;
       setFollow(false);                  // δείξε όλη τη διαδρομή, μείνε ελεύθερος
-      programmaticMove = true;
+      suppressAutoUntil = Date.now() + 800;
       map.fitBounds(routeLines[0].line.getBounds(), { padding: [50, 50] });
     });
 
@@ -818,6 +829,14 @@
       $("navDist").textContent = "";
       $("navIco").textContent = "●";
       speak("Εκκίνηση διαδρομής.");
+      // ΚΡΙΣΙΜΟ: το πάνελ κρύφτηκε, ο χάρτης μεγάλωσε — αλλιώς το Leaflet
+      // κεντράρει με λάθος διαστάσεις και ο κέρσορας φεύγει εκτός οθόνης.
+      setTimeout(() => {
+        map.invalidateSize();
+        if (nav.lastPos) recenterMap(nav.lastPos, 16);
+      }, 60);
+      // Δείξε ζωντανή κίνηση TomTom πάνω στη διαδρομή (αν υπάρχει κλειδί).
+      if (trafficReady && !map.hasLayer(trafficLayer)) trafficLayer.addTo(map);
 
       nav.watchId = navigator.geolocation.watchPosition(onNavPosition, err => {
         $("navText").textContent = "Αποτυχία GPS: " + err.message;
@@ -835,8 +854,10 @@
       $("panel").style.display = "flex";
       $("navBanner").style.display = "none";
       $("navBottom").style.display = "none";
+      // Το πάνελ ξαναφάνηκε → ο χάρτης άλλαξε μέγεθος: ενημέρωσε το Leaflet.
+      setTimeout(() => map.invalidateSize(), 50);
       if (routeLines.length) {
-        programmaticMove = true;
+        suppressAutoUntil = Date.now() + 800;
         map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
       }
     }

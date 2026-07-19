@@ -40,6 +40,13 @@
     }
     #modes button.active { background: #1a73e8; border-color: #1a73e8; }
 
+    #avoidWrap {
+      display: flex; align-items: center; gap: 6px; font-size: 12px;
+      color: #333; padding: 1px 2px; cursor: pointer;
+    }
+    #avoidWrap input { width: 15px; height: 15px; flex: none; }
+    #avoidWrap.disabled { color: #aaa; cursor: not-allowed; }
+
     #actions { display: flex; gap: 6px; }
     #actions button {
       padding: 11px; font-size: 15px; font-weight: 600; border: none;
@@ -55,6 +62,7 @@
       border-radius: 4px; padding: 2px 6px; font-size: 12px;
       font-weight: 600; margin-left: 6px;
     }
+    #result .badge.traffic { background: #fef7e0; color: #b06000; }
     #result .alt { color: #666; font-size: 13px; }
     #result .error { color: #c5221f; }
 
@@ -194,6 +202,10 @@
         <button data-mode="bike" title="Ποδήλατο">🚲</button>
         <button data-mode="foot" title="Περπάτημα">🚶</button>
       </div>
+      <label id="avoidWrap">
+        <input type="checkbox" id="avoidTraffic" checked>
+        <span>🚦 Αποφυγή κίνησης (διαλέγει πιο γρήγορο δρόμο, TomTom)</span>
+      </label>
       <div id="actions">
         <button id="go">Διαδρομή</button>
         <button id="startNav">▶ Εκκίνηση</button>
@@ -241,8 +253,13 @@
   <script src="leaflet/leaflet.js"></script>
   <script>
     // ====================================================================
-    // Διαδρομές ΧΩΡΙΣ real-time κίνηση: OSRM (routing.openstreetmap.de)
-    // δρομολογεί μόνο με στατικά δεδομένα δρόμων του OpenStreetMap.
+    // ΔΥΟ πηγές δρομολόγησης, εναλλάξιμες με το checkbox «Αποφυγή κίνησης»:
+    //   • OSRM (routing.openstreetmap.de) — στατικό, ΑΓΝΟΕΙ την κίνηση,
+    //     χωρίς κλειδί. Προεπιλογή όταν δεν υπάρχει κλειδί TomTom.
+    //   • TomTom Routing API (traffic=true) — ΛΑΜΒΑΝΕΙ υπόψη τη ζωντανή
+    //     κίνηση και προτείνει διαφορετικό δρόμο αν ο κύριος έχει
+    //     μποτιλιάρισμα (μόνο αυτοκίνητο, χρειάζεται το ίδιο κλειδί TomTom
+    //     με το traffic overlay/περιστατικά πιο κάτω).
     // Geocoding/autocomplete: Photon + Nominatim (δωρεάν, χωρίς κλειδί).
     // Ζωντανή πλοήγηση: watchPosition + προβολή θέσης πάνω στη διαδρομή.
     // ====================================================================
@@ -530,11 +547,26 @@
     $("locate").addEventListener("click", useMyLocation);
 
     // ---- Λειτουργίες μετακίνησης ----------------------------------------
+    // Το checkbox «Αποφυγή κίνησης» δουλεύει μόνο με αυτοκίνητο + κλειδί TomTom.
+    function updateAvoidToggle() {
+      const wrap = $("avoidWrap"), cb = $("avoidTraffic");
+      const eligible = trafficReady && mode === "car";
+      cb.disabled = !eligible;
+      wrap.classList.toggle("disabled", !eligible);
+      wrap.title = !trafficReady ? "Χρειάζεται κλειδί TomTom."
+        : mode !== "car" ? "Διαθέσιμο μόνο για αυτοκίνητο." : "";
+      if (!eligible) cb.checked = false;
+      else if (!wrap.dataset.touched) cb.checked = true;   // προεπιλογή ON
+    }
+    $("avoidTraffic").addEventListener("change", () => { $("avoidWrap").dataset.touched = "1"; });
+    updateAvoidToggle();
+
     document.querySelectorAll("#modes button").forEach(b => {
       b.addEventListener("click", () => {
         document.querySelectorAll("#modes button").forEach(x => x.classList.remove("active"));
         b.classList.add("active");
         mode = b.dataset.mode;
+        updateAvoidToggle();
         maybeRoute();
       });
     });
@@ -566,6 +598,91 @@
       stepsToggle.textContent = open ? "Οδηγίες βήμα-βήμα ▾" : "Οδηγίες βήμα-βήμα ▴";
     });
 
+    // ====================================================================
+    // ΑΠΟΦΥΓΗ ΚΙΝΗΣΗΣ — δρομολόγηση με το TomTom Routing API (traffic=true).
+    // Σε αντίθεση με το OSRM πιο πάνω (στατικό, ΠΟΤΕ δεν βλέπει κίνηση), το
+    // TomTom υπολογίζει τη διαδρομή ΛΑΜΒΑΝΟΝΤΑΣ ΥΠΟΨΗ τη ζωντανή κίνηση —
+    // αν ο κύριος δρόμος έχει μποτιλιάρισμα, προτείνει άλλον. Ίδιο κλειδί
+    // με το traffic overlay/περιστατικά παραπάνω.
+    // ====================================================================
+    const TT_TRAVEL_MODE = { car: "car", bike: "bicycle", foot: "pedestrian" };
+
+    // Κωδικοί ελιγμών TomTom → [type, modifier] στο ίδιο λεξιλόγιο που ήδη
+    // καταλαβαίνει το stepInfo() (χτισμένο πάνω στο λεξιλόγιο του OSRM),
+    // ώστε οι οδηγίες/η πλοήγηση να δουλεύουν αμετάβλητες και για τις δύο πηγές.
+    const TT_MANEUVER = {
+      DEPART: ["depart", null], ARRIVE: ["arrive", null],
+      ARRIVE_LEFT: ["arrive", null], ARRIVE_RIGHT: ["arrive", null],
+      STRAIGHT: ["turn", "straight"], CONTINUE: ["turn", "straight"],
+      TURN_LEFT: ["turn", "left"], TURN_RIGHT: ["turn", "right"],
+      SHARP_LEFT: ["turn", "sharp left"], SHARP_RIGHT: ["turn", "sharp right"],
+      BEAR_LEFT: ["turn", "slight left"], BEAR_RIGHT: ["turn", "slight right"],
+      KEEP_LEFT: ["turn", "slight left"], KEEP_RIGHT: ["turn", "slight right"],
+      UTURN_LEFT: ["turn", "uturn"], UTURN_RIGHT: ["turn", "uturn"],
+      ROUNDABOUT_CROSS: ["roundabout", null], ROUNDABOUT_LEFT: ["roundabout", null],
+      ROUNDABOUT_RIGHT: ["roundabout", null], ROUNDABOUT_BACK: ["roundabout", null],
+      MERGE: ["merge", null], MOTORWAY_ENTER: ["on ramp", null],
+      MOTORWAY_EXIT_LEFT: ["off ramp", "left"], MOTORWAY_EXIT_RIGHT: ["off ramp", "right"],
+      MOTORWAY_EXIT: ["off ramp", null],
+      FORK_LEFT: ["fork", "left"], FORK_RIGHT: ["fork", "right"],
+      END_OF_ROAD_LEFT: ["end of road", "left"], END_OF_ROAD_RIGHT: ["end of road", "right"],
+    };
+
+    // Μετατρέπει μια διαδρομή TomTom στην ΙΔΙΑ δομή που παράγει το OSRM
+    // (geometry.coordinates [lon,lat], distance, duration, legs[].steps[])
+    // — έτσι drawRoutes/buildNavData/renderSteps/colorRouteByTraffic τη
+    // χρησιμοποιούν χωρίς καμία αλλαγή, όποια πηγή κι αν την έφτιαξε.
+    function ttAdaptRoute(route) {
+      const legPts = (route.legs || []).flatMap(l => l.points || []);
+      const coordinates = legPts.map(p => [p.longitude, p.latitude]);
+      const instr = (route.guidance && route.guidance.instructions) || [];
+      const steps = instr.map((ins, i) => {
+        const [type, modifier] = TT_MANEUVER[ins.maneuver] || ["turn", "straight"];
+        const next = instr[i + 1];
+        const dist = next
+          ? Math.max(0, (next.routeOffsetInMeters || 0) - (ins.routeOffsetInMeters || 0)) : 0;
+        const step = {
+          name: ins.street || (ins.roadNumbers && ins.roadNumbers[0]) || "",
+          distance: dist,
+          maneuver: { type, modifier, location: [ins.point.longitude, ins.point.latitude] },
+        };
+        if (ins.roundaboutExitNumber) step.maneuver.exit = ins.roundaboutExitNumber;
+        return step;
+      });
+      return {
+        geometry: { coordinates },
+        distance: route.summary.lengthInMeters,
+        duration: route.summary.travelTimeInSeconds,
+        legs: [{ steps }],
+        __source: "tomtom",
+        __trafficDelay: route.summary.trafficDelayInSeconds || 0,
+      };
+    }
+
+    async function fetchTomTomRoutes(o, d, tmode) {
+      const travelMode = TT_TRAVEL_MODE[tmode] || "car";
+      const url = "https://api.tomtom.com/routing/1/calculateRoute/" +
+        `${o.lat},${o.lon}:${d.lat},${d.lon}/json` +
+        `?key=${TRAFFIC_KEY}&traffic=true&routeType=fastest&travelMode=${travelMode}` +
+        `&instructionsType=coded&language=el-GR` +
+        `&maxAlternatives=${nav.active ? 0 : 2}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("TomTom HTTP " + resp.status);
+      const data = await resp.json();
+      if (!data.routes || !data.routes.length) throw new Error("Δεν βρέθηκε διαδρομή (TomTom).");
+      return data.routes.map(ttAdaptRoute);
+    }
+
+    async function fetchOSRMRoutes(o, d, tmode) {
+      const url = `${PROFILES[tmode]}/${o.lon},${o.lat};${d.lon},${d.lat}` +
+        `?overview=full&geometries=geojson&alternatives=${nav.active ? "false" : "true"}&steps=true`;
+      const data = await (await fetch(url)).json();
+      if (data.code !== "Ok" || !data.routes.length)
+        throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");
+      data.routes.forEach(r => { r.__source = "osrm"; });
+      return data.routes;
+    }
+
     // ---- Υπολογισμός διαδρομής ------------------------------------------
     function maybeRoute() { if (origin && dest) calculateRoute(); }
 
@@ -593,13 +710,21 @@
 
       $("go").disabled = true;
       if (!nav.active) resultEl.textContent = "Υπολογισμός…";
+      const useTomTom = $("avoidTraffic").checked && trafficReady && mode === "car";
       try {
-        const url = `${PROFILES[mode]}/${origin.lon},${origin.lat};${dest.lon},${dest.lat}` +
-          `?overview=full&geometries=geojson&alternatives=${nav.active ? "false" : "true"}&steps=true`;
-        const data = await (await fetch(url)).json();
-        if (data.code !== "Ok" || !data.routes.length)
-          throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");
-        await drawRoutes(data.routes);
+        let routes;
+        if (useTomTom) {
+          try {
+            routes = await fetchTomTomRoutes(origin, dest, mode);
+          } catch (e) {
+            // Το TomTom απέτυχε (δίκτυο/όριο) → μη μείνει ο χρήστης χωρίς
+            // διαδρομή, γύρνα αθόρυβα στο στατικό OSRM.
+            routes = await fetchOSRMRoutes(origin, dest, mode);
+          }
+        } else {
+          routes = await fetchOSRMRoutes(origin, dest, mode);
+        }
+        await drawRoutes(routes);
       } catch (e) {
         resultEl.innerHTML = `<span class="error">Σφάλμα: ${e.message}</span>`;
       } finally {
@@ -651,8 +776,12 @@
 
     function showRouteInfo(idx) {
       const { route } = routeLines[idx];
-      let html = `<strong>${fmtDist(route.distance)}</strong> · ${fmtDur(route.duration)}` +
-        `<span class="badge">χωρίς δεδομένα κίνησης</span>`;
+      const badge = route.__source === "tomtom"
+        ? `<span class="badge traffic">🚦 αποφυγή κίνησης` +
+          (route.__trafficDelay > 60 ? ` (+${Math.round(route.__trafficDelay / 60)}′ λόγω κίνησης)` : "") +
+          `</span>`
+        : `<span class="badge">χωρίς δεδομένα κίνησης</span>`;
+      let html = `<strong>${fmtDist(route.distance)}</strong> · ${fmtDur(route.duration)}` + badge;
       if (routeLines.length > 1) {
         html += `<div class="alt">${routeLines.length - 1} εναλλακτική/ές — πάτησε πάνω σε γκρι διαδρομή για επιλογή</div>`;
       }

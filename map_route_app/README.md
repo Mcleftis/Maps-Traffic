@@ -31,8 +31,27 @@ Two extra details make it "strict":
 | File | What it is |
 |---|---|
 | `index.html` | Complete, self-contained web app (works on mobile browsers): map, origin/destination autocomplete, route drawn as a polyline, distance + duration shown with a "traffic ignored" badge. |
-| `index_osm.html` | **No-API-key version** (OpenStreetMap + Leaflet + OSRM). OSRM routes on static OSM road data only — it has no access to live traffic at all, so it is traffic-free by construction. Just open the file in any browser. |
+| `index_osm.html` | **No-API-key version** (OpenStreetMap + Leaflet + OSRM), now with an optional **traffic-avoiding** routing mode — see below. Just open the file in any browser. |
 | `route_no_traffic.py` | Command-line version: geocodes two addresses and prints distance/duration computed with `TRAFFIC_UNAWARE`. |
+
+## Two routing modes in `index_osm.html` (this is the opposite of the section above!)
+
+`index.html` and `route_no_traffic.py` still do exactly what their name says:
+they **ignore** traffic on purpose (`TRAFFIC_UNAWARE`). `index_osm.html` (and
+the Android APK built from it) evolved differently at the user's request and
+now offers **both** behaviours, switchable with the **"🚦 Αποφυγή κίνησης"**
+checkbox next to the travel-mode buttons (car only):
+
+| Checkbox | Source | Behaviour |
+|---|---|---|
+| ☐ off | OSRM (`routing.openstreetmap.de`) | Static road data only, ignores live traffic — same spirit as `TRAFFIC_UNAWARE` above. Free, no key. |
+| ☑ on (default, needs a TomTom key) | TomTom Routing API (`traffic=true`) | Genuinely **avoids** congestion — computes the route using live traffic and will pick a different road if the main one is jammed, like Google Maps' default driving directions. |
+
+If TomTom fails (quota/network) the app silently falls back to OSRM so a
+route is always returned. The result badge shows which source was actually
+used (🚦 orange badge for traffic-avoiding TomTom routes, green "χωρίς
+δεδομένα κίνησης" for static OSRM ones), including the extra minutes lost to
+traffic when TomTom reports a delay.
 
 ## Live traffic (`index_osm.html` / the APK)
 

@@ -45,13 +45,8 @@ public class AlertListener extends NotificationListenerService {
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         try {
-            // Any messaging app — the group-name filter below decides what
-            // matters. (The groups may live on Telegram/WhatsApp/Viber/...)
-            if (sbn == null) return;
-            String pkg = sbn.getPackageName();
-            if (pkg == null || pkg.equals(getPackageName())
-                    || pkg.equals("android") || pkg.equals("com.android.systemui"))
-                return;
+            // ΜΟΝΟ Viber — καμία άλλη εφαρμογή.
+            if (sbn == null || !"com.viber.voip".equals(sbn.getPackageName())) return;
             Notification n = sbn.getNotification();
             if (n == null || n.extras == null) return;
             Bundle ex = n.extras;

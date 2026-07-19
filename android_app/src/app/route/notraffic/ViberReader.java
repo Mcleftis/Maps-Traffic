@@ -32,6 +32,10 @@ public class ViberReader extends AccessibilityService {
                 && t != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                 && t != AccessibilityEvent.TYPE_VIEW_SCROLLED) return;
 
+        // ΜΟΝΟ Viber στο προσκήνιο — αγνόησε κάθε άλλη εφαρμογή.
+        CharSequence pkg = event.getPackageName();
+        if (pkg == null || !"com.viber.voip".contentEquals(pkg)) return;
+
         long now = System.currentTimeMillis();
         if (now - lastScan < 700) return;            // throttle heavy scans
         lastScan = now;

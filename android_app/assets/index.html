@@ -65,6 +65,12 @@
     #result .badge.traffic { background: #fef7e0; color: #b06000; }
     #result .alt { color: #666; font-size: 13px; }
     #result .error { color: #c5221f; }
+    #routeChoices { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    #routeChoices .rc {
+      padding: 6px 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+      border: 1px solid #ccc; border-radius: 16px; background: #fff; color: #444;
+    }
+    #routeChoices .rc.on { background: #1a73e8; border-color: #1a73e8; color: #fff; }
 
     #stepsToggle {
       display: none; font-size: 13px; font-weight: 600; color: #1a73e8;
@@ -146,12 +152,12 @@
     }
     #alertsBtn.on { background: #c5221f !important; }
 
-    .traffic-legend {
-      background: #fff; padding: 6px 9px; border-radius: 6px;
-      box-shadow: 0 1px 4px rgba(0,0,0,.3); font-size: 12px; line-height: 1.5;
+    .sat-btn {
+      width: 40px; height: 40px; border: none; border-radius: 8px;
+      background: #fff; font-size: 20px; cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,.35);
     }
-    .traffic-legend div { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
-    .traffic-legend i { width: 16px; height: 6px; border-radius: 2px; flex: none; }
+    .sat-btn.on { background: #1a73e8; }
 
     #recenterBtn {
       display: none; position: absolute; right: 12px; bottom: 78px; z-index: 1600;
@@ -306,12 +312,28 @@
     const trafficRouteLayer = L.layerGroup();
     const flowCache = {};
 
-    L.control.layers(
-      { "Χάρτης": osmLayer, "Δορυφόρος": satLayer },
-      { "🚦 Κίνηση (ζωντανά)": trafficLayer },
-      { position: "topright", collapsed: false }
-    ).addTo(map);
+    // Χωρίς κουτιά ελέγχου: η κίνηση είναι ΠΑΝΤΑ ενεργή (αν υπάρχει κλειδί).
+    if (trafficReady) trafficLayer.addTo(map);
     L.control.scale({ metric: true, imperial: false }).addTo(map);
+
+    // Μικρό κουμπί εναλλαγής Χάρτης/Δορυφόρος (αντί για ολόκληρο πάνελ).
+    let satOn = false;
+    const satBtn = L.control({ position: "topright" });
+    satBtn.onAdd = () => {
+      const b = L.DomUtil.create("button", "sat-btn");
+      b.innerHTML = "🛰️";
+      b.title = "Δορυφόρος / Χάρτης";
+      L.DomEvent.disableClickPropagation(b);
+      b.onclick = () => {
+        satOn = !satOn;
+        if (satOn) { osmLayer.remove(); satLayer.addTo(map); }
+        else { satLayer.remove(); osmLayer.addTo(map); }
+        if (trafficReady) trafficLayer.bringToFront();
+        b.classList.toggle("on", satOn);
+      };
+      return b;
+    };
+    satBtn.addTo(map);
 
     // Λόγος currentSpeed/freeFlowSpeed σε ένα σημείο → χρώμα κίνησης.
     async function flowRatio(lat, lon) {
@@ -390,31 +412,6 @@
       if (!colors) { map.removeLayer(trafficRouteLayer); return; }
       paintSegments(ll, colors, trafficRouteLayer);
     }
-
-    // Υπόμνημα χρωμάτων κίνησης (εμφανίζεται όταν το layer είναι ενεργό).
-    const trafficLegend = L.control({ position: "bottomleft" });
-    trafficLegend.onAdd = () => {
-      const d = L.DomUtil.create("div", "traffic-legend");
-      d.innerHTML = "<b>🚦 Κίνηση</b>" +
-        '<div><i style="background:#2f9e44"></i>Ελεύθερα</div>' +
-        '<div><i style="background:#f59f00"></i>Πυκνή</div>' +
-        '<div><i style="background:#e03131"></i>Μποτιλιάρισμα</div>';
-      return d;
-    };
-    let trafficWarned = false;
-    function warnTrafficKey() {
-      if (trafficWarned) return; trafficWarned = true;
-      $("result").innerHTML = '<span class="error">Για ζωντανή κίνηση χρειάζεται ' +
-        'δωρεάν κλειδί TomTom (δες οδηγίες στο README).</span>';
-    }
-    trafficLayer.on("tileerror", warnTrafficKey);
-    map.on("overlayadd", e => {
-      if (e.layer === trafficLayer) { trafficLegend.addTo(map); if (!trafficReady) warnTrafficKey(); }
-    });
-    map.on("overlayremove", e => { if (e.layer === trafficLayer) map.removeControl(trafficLegend); });
-
-    // Αν υπάρχει κλειδί, δείξε την κίνηση αμέσως, παντού.
-    if (trafficReady) { trafficLayer.addTo(map); trafficLegend.addTo(map); }
 
     // ---- Κατάσταση -------------------------------------------------------
     let origin = null, dest = null;      // {lat, lon}
@@ -701,7 +698,7 @@
     function maybeRoute() { if (origin && dest) calculateRoute(); }
 
     function clearRoutes() {
-      routeLines.forEach(r => r.line.remove());
+      routeLines.forEach(r => { r.line.remove(); if (r.hit) r.hit.remove(); });
       routeLines = [];
     }
 
@@ -750,12 +747,16 @@
       clearRoutes();
       routes.forEach((route, i) => {
         const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+        // Αόρατη «ζώνη κλικ» — πατιέται πιο εύκολα χωρίς φουλ ζουμ (τα κουμπιά
+        // επιλογής παραμένουν ο κύριος, σίγουρος τρόπος).
+        const hit = L.polyline(latlngs, { color: "#000", weight: 18, opacity: 0 }).addTo(map);
+        hit.on("click", () => { if (!nav.active) selectRoute(i); });
         const line = L.polyline(latlngs, i === 0
           ? { color: "#1a73e8", weight: 6, opacity: 0.95 }
           : { color: "#9aa0a6", weight: 5, opacity: 0.8, dashArray: "6 8" }
         ).addTo(map);
         line.on("click", () => { if (!nav.active) selectRoute(i); });
-        routeLines.push({ line, route });
+        routeLines.push({ line, hit, route });
       });
       routeLines[0].line.bringToFront();
       activeIdx = 0;
@@ -798,7 +799,16 @@
         : `<span class="badge">χωρίς δεδομένα κίνησης</span>`;
       let html = `<strong>${fmtDist(route.distance)}</strong> · ${fmtDur(route.duration)}` + badge;
       if (routeLines.length > 1) {
-        html += `<div class="alt">${routeLines.length - 1} εναλλακτική/ές — πάτησε πάνω σε γκρι διαδρομή για επιλογή</div>`;
+        // Κουμπιά επιλογής διαδρομής — απλό άγγιγμα, χωρίς ζουμ στη γραμμή.
+        const fastest = Math.min(...routeLines.map(r => r.route.duration));
+        html += '<div id="routeChoices">' + routeLines.map((r, i) => {
+          const dur = Math.round(r.route.duration / 60);
+          const extra = r.route.duration - fastest;
+          const tag = i === 0 ? "Κύρια" : "Εναλλ. " + i;
+          const diff = extra < 30 ? "" : ` +${Math.round(extra / 60)}′`;
+          return `<button class="rc${i === idx ? " on" : ""}" onclick="selectRoute(${i})">` +
+                 `${tag} · ${dur}′${diff}</button>`;
+        }).join("") + "</div>";
       }
       resultEl.innerHTML = html;
       renderSteps(route);

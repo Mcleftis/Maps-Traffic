@@ -99,28 +99,39 @@
     }
     #navStop { background: #fce8e6 !important; color: #c5221f; font-weight: 700; }
 
-    /* ---- Ειδοποιήσεις ομάδων (Viber) ---- */
-    #alertsPanel { display: none; border-top: 1px solid #eee; margin-top: 4px; }
-    #alertsHead {
-      display: flex; align-items: center; justify-content: space-between;
-      font-size: 13px; font-weight: 700; color: #c5221f; padding: 6px 2px 4px;
+    /* ---- Καρτέλες: Κίνηση (TomTom) / Ομάδες (Viber) — συμπαγές ---- */
+    #alertsPanel { display: none; border-top: 1px solid #eee; margin-top: 3px; }
+    #alertsTabs {
+      display: flex; align-items: center; gap: 4px; padding: 3px 0;
     }
-    #alertsHead button { background: none; border: none; font-size: 15px; cursor: pointer; }
-    #alertsEnable { font-size: 13px; }
+    #alertsTabs .tab {
+      flex: 1; padding: 5px 4px; font-size: 12px; font-weight: 700;
+      border: 1px solid #ddd; border-radius: 6px; background: #f5f5f5;
+      color: #666; cursor: pointer;
+    }
+    #alertsTabs .tab.active { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+    #alertsClear { background: none; border: none; font-size: 15px; cursor: pointer; flex: none; padding: 0 2px; }
+    #alertsEnable { font-size: 12px; }
     #alertsEnable button {
-      width: 100%; padding: 9px; margin: 2px 0 6px; border: none; border-radius: 6px;
-      background: #c5221f; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+      width: 100%; padding: 7px; margin: 2px 0 4px; border: none; border-radius: 6px;
+      background: #c5221f; color: #fff; font-size: 12px; font-weight: 600; cursor: pointer;
     }
-    #alertsList { max-height: 30vh; overflow-y: auto; }
-    #alertsList .a {
-      display: flex; gap: 9px; align-items: baseline;
-      padding: 7px 4px; font-size: 14px; border-bottom: 1px solid #f3f3f3; cursor: pointer;
+    .alist { max-height: 34vh; overflow-y: auto; }
+    /* Τηλεγραφικές γραμμές: μικρότερα γράμματα, στενό padding, μονή σειρά. */
+    .alist .a {
+      display: flex; gap: 6px; align-items: baseline;
+      padding: 3px 2px; font-size: 12px; line-height: 1.25;
+      border-bottom: 1px solid #f4f4f4; cursor: pointer;
     }
-    #alertsList .a .ai { font-size: 18px; width: 24px; text-align: center; flex: none; }
-    #alertsList .a .am { flex: 1; }
-    #alertsList .a .am small { color: #888; }
-    #alertsList .a .at { color: #999; font-size: 11px; flex: none; }
-    #alertsList .empty { color: #888; font-size: 13px; padding: 8px 4px; }
+    .alist .a .ai { font-size: 14px; width: 17px; text-align: center; flex: none; }
+    .alist .a .am { flex: 1; min-width: 0; }
+    .alist .a .am b { font-weight: 600; }
+    .alist .a .am .sub {
+      color: #999; font-size: 10.5px; display: block;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .alist .a .at { color: #bbb; font-size: 10px; flex: none; }
+    .alist .empty { color: #888; font-size: 11.5px; padding: 6px 2px; line-height: 1.4; }
     .alert-pin {
       font-size: 22px; text-align: center; line-height: 1;
       filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
@@ -195,12 +206,18 @@
       <button id="stepsToggle">Οδηγίες βήμα-βήμα ▾</button>
       <div id="steps"></div>
       <div id="alertsPanel">
-        <div id="alertsHead">
-          <span>🚦 Κίνηση & περιστατικά (TomTom)</span>
+        <div id="alertsTabs">
+          <button class="tab active" data-tab="traffic">🚦 Κίνηση</button>
+          <button class="tab" data-tab="groups">💬 Ομάδες</button>
           <button id="alertsClear" title="Καθαρισμός">🗑️</button>
         </div>
-        <div id="alertsEnable"></div>
-        <div id="alertsList"></div>
+        <div id="tabTraffic" class="tabpane">
+          <div id="trafficList" class="alist"></div>
+        </div>
+        <div id="tabGroups" class="tabpane" hidden>
+          <div id="alertsEnable"></div>
+          <div id="groupsList" class="alist"></div>
+        </div>
       </div>
     </div>
     <div id="map">
@@ -513,7 +530,7 @@
         const data = await (await fetch(url)).json();
         if (data.code !== "Ok" || !data.routes.length)
           throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");
-        drawRoutes(data.routes);
+        await drawRoutes(data.routes);
       } catch (e) {
         resultEl.innerHTML = `<span class="error">Σφάλμα: ${e.message}</span>`;
       } finally {
@@ -521,7 +538,7 @@
       }
     }
 
-    function drawRoutes(routes) {
+    async function drawRoutes(routes) {
       clearRoutes();
       routes.forEach((route, i) => {
         const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
@@ -536,7 +553,7 @@
       activeIdx = 0;
       if (nav.active) {
         // Επαναϋπολογισμός εν κινήσει: νέα δεδομένα πλοήγησης, χωρίς fitBounds.
-        buildNavData(routeLines[0].route);
+        await buildNavData(routeLines[0].route);
       } else {
         map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
         showRouteInfo(0);
@@ -676,13 +693,36 @@
       return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
     }
 
-    function buildNavData(route) {
+    // ---- ΝΗΜΑ ΠΑΡΑΣΚΗΝΙΟΥ (Web Worker) -------------------------------
+    // Το «HPC» για WebView: η βαριά γεωμετρία διαδρομής (αθροιστικές
+    // αποστάσεις + αντιστοίχιση ελιγμών, O(σημεία×ελιγμοί)) τρέχει σε
+    // ξεχωριστό νήμα ώστε το UI να μη «παγώνει» σε μεγάλες διαδρομές.
+    // Fallback σε synchronous αν ο browser/WebView δεν επιτρέπει Worker.
+    let navWorker = null;
+    try {
+      const workerSrc =
+        'var R=6371000;function tr(d){return d*Math.PI/180;}' +
+        'function hav(a,b){var x=tr(b[0]-a[0]),y=tr(b[1]-a[1]);' +
+        'var s=Math.sin(x/2)*Math.sin(x/2)+Math.cos(tr(a[0]))*Math.cos(tr(b[0]))*Math.sin(y/2)*Math.sin(y/2);' +
+        'return 2*R*Math.asin(Math.sqrt(s));}' +
+        'self.onmessage=function(e){var coords=e.data.coords,steps=e.data.steps;' +
+        'var pts=coords.map(function(c){return [c[1],c[0]];});' +
+        'var cum=[0];for(var i=1;i<pts.length;i++)cum.push(cum[i-1]+hav(pts[i-1],pts[i]));' +
+        'var total=cum.length?cum[cum.length-1]:0;' +
+        'var mans=steps.map(function(s){var ml=[s.maneuver.location[1],s.maneuver.location[0]];' +
+        'var best=0,bd=Infinity;for(var i=0;i<pts.length;i++){var d=hav(pts[i],ml);if(d<bd){bd=d;best=i;}}' +
+        'return {step:s,at:cum[best]||0};});' +
+        'self.postMessage({pts:pts,cum:cum,total:total,mans:mans});};';
+      navWorker = new Worker(URL.createObjectURL(
+        new Blob([workerSrc], { type: "application/javascript" })));
+    } catch (e) { navWorker = null; }
+
+    function buildNavDataSync(route) {
       nav.pts = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
       nav.cum = [0];
       for (let i = 1; i < nav.pts.length; i++)
         nav.cum.push(nav.cum[i - 1] + havDist(nav.pts[i - 1], nav.pts[i]));
-      nav.total = nav.cum[nav.cum.length - 1];
-      nav.duration = route.duration;
+      nav.total = nav.cum[nav.cum.length - 1] || 0;
       const steps = (route.legs || []).flatMap(l => l.steps || []);
       nav.mans = steps.map(s => {
         const ml = [s.maneuver.location[1], s.maneuver.location[0]];
@@ -691,11 +731,36 @@
           const d = havDist(nav.pts[i], ml);
           if (d < bd) { bd = d; best = i; }
         }
-        return { step: s, at: nav.cum[best] };
+        return { step: s, at: nav.cum[best] || 0 };
       });
-      nav.announced = {};
-      nav.offCount = 0;
-      nav.snapIdx = 0;                    // πλήρης σάρωση στο πρώτο στίγμα
+    }
+
+    // Επιστρέφει Promise· ενημερώνει nav.* όταν ολοκληρωθεί ο υπολογισμός.
+    function buildNavData(route) {
+      nav.duration = route.duration;
+      const done = () => { nav.announced = {}; nav.offCount = 0; nav.snapIdx = 0; };
+      return new Promise(resolve => {
+        if (!navWorker) { buildNavDataSync(route); done(); resolve(); return; }
+        const onmsg = e => {
+          navWorker.removeEventListener("message", onmsg);
+          navWorker.removeEventListener("error", onerr);
+          nav.pts = e.data.pts; nav.cum = e.data.cum;
+          nav.total = e.data.total; nav.mans = e.data.mans;
+          done(); resolve();
+        };
+        const onerr = () => {                // ο worker απέτυχε → sync
+          navWorker.removeEventListener("message", onmsg);
+          navWorker.removeEventListener("error", onerr);
+          navWorker = null;
+          buildNavDataSync(route); done(); resolve();
+        };
+        navWorker.addEventListener("message", onmsg);
+        navWorker.addEventListener("error", onerr);
+        navWorker.postMessage({
+          coords: route.geometry.coordinates,
+          steps: (route.legs || []).flatMap(l => l.steps || []),
+        });
+      });
     }
 
     // Σημείο πάνω στη διαδρομή σε δεδομένη απόσταση κατά μήκος (μέτρα).
@@ -801,13 +866,13 @@
       if (nav.muted && window.speechSynthesis) speechSynthesis.cancel();
     });
 
-    function startNavigation() {
+    async function startNavigation() {
       if (!routeLines.length) return;
       if (!navigator.geolocation) {
         resultEl.innerHTML = '<span class="error">Δεν υποστηρίζεται εντοπισμός θέσης.</span>';
         return;
       }
-      buildNavData(routeLines[activeIdx].route);
+      await buildNavData(routeLines[activeIdx].route);
       // Κράτα μόνο την ενεργή διαδρομή στον χάρτη.
       routeLines.forEach((r, i) => { if (i !== activeIdx) r.line.remove(); });
       routeLines = [routeLines[activeIdx]];
@@ -1272,70 +1337,64 @@
     }
 
     // ------------------------------------------------------------------
-    // Ενιαία λίστα: TomTom περιστατικά + Waze + μηνύματα ομάδων.
+    // Δύο καρτέλες — Κίνηση (TomTom + Waze) / Ομάδες (Viber). Τηλεγραφικά.
     // ------------------------------------------------------------------
-    function renderAlertList(groupItems, rawCount) {
-      const list = $("alertsList");
-      const entries = [];
-      tomtomItems.forEach(i => {
-        entries.push({
-          ico: i.cat.ico, main: (i.road ? i.road : "") + i.ev,
-          small: (i.where || i.cat.label) + " · TomTom" +
-                 (i.delay ? " · καθυστ. " + Math.round(i.delay / 60) + " λεπ" : ""),
-          t: i.t,
-          go: () => { map.setView([i.coord.lat, i.coord.lon], 15);
-                      if (tomtomMarkers[i.id]) tomtomMarkers[i.id].openPopup(); },
-        });
+    const hhmm = t => new Date(t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
+
+    function paintList(el, entries, emptyMsg) {
+      entries.sort((a, b) => b.t - a.t);
+      if (!entries.length) { el.innerHTML = '<div class="empty">' + emptyMsg + "</div>"; return; }
+      el.innerHTML = "";
+      entries.forEach(e => {
+        const div = document.createElement("div");
+        div.className = "a";
+        div.innerHTML = `<span class="ai">${e.ico}</span>` +
+          `<span class="am"><b>${e.main}</b><span class="sub">${e.sub}</span></span>` +
+          `<span class="at">${hhmm(e.t)}</span>`;
+        div.onclick = e.go;
+        el.appendChild(div);
       });
+    }
+
+    // Καρτέλα «Κίνηση»: περιστατικά TomTom + αναφορές Waze.
+    function renderTrafficTab() {
+      const entries = [];
+      tomtomItems.forEach(i => entries.push({
+        ico: i.cat.ico,
+        main: (i.road || "") + i.ev,
+        sub: (i.where || i.cat.label) + (i.delay ? " · +" + Math.round(i.delay / 60) + "′" : ""),
+        t: i.t,
+        go: () => { map.setView([i.coord.lat, i.coord.lon], 15);
+                    if (tomtomMarkers[i.id]) tomtomMarkers[i.id].openPopup(); },
+      }));
       wazeItems.forEach(a => {
         const wt = WAZE_TYPES[a.type];
         entries.push({
           ico: wt.ico,
           main: a.subType === "POLICE_HIDING" ? "Κρυμμένη τροχαία" : wt.label,
-          small: ([a.street, a.city].filter(Boolean).join(", ") || "") +
-                 " · Waze · " + wazeAge(a.pubMillis),
+          sub: ([a.street, a.city].filter(Boolean).join(", ") || "") + " · " + wazeAge(a.pubMillis),
           t: a.pubMillis,
           go: () => { map.setView([a.location.y, a.location.x], 15);
                       if (wazeMarkers[a.uuid]) wazeMarkers[a.uuid].openPopup(); },
         });
       });
-      groupItems.forEach(r => {
-        entries.push({
-          ico: r.cls.ico, main: r.m,
-          small: r.g + (r.place ? " · " + r.place : ""),
-          t: r.t,
-          go: () => { if (r.coords) { map.setView([r.coords.lat, r.coords.lon], 15);
-                      if (alertMarkers[r.id]) alertMarkers[r.id].marker.openPopup(); } },
-        });
-      });
-      entries.sort((a, b) => b.t - a.t);
+      const empty = !trafficReady
+        ? "Χρειάζεται κλειδί TomTom για περιστατικά κίνησης."
+        : (tomtomError || wazeError || "Καμία αναφορά εδώ τώρα — ζουμ σε πόλη/αυτοκινητόδρομο.");
+      paintList($("trafficList"), entries, empty);
+    }
 
-      if (!entries.length) {
-        let msg;
-        if (!trafficReady) {
-          msg = "Για τα ζωντανά περιστατικά κίνησης (TomTom) χρειάζεται ένα " +
-            "δωρεάν κλειδί TomTom — δες το README. Χωρίς κλειδί δείχνονται μόνο " +
-            "οι δωρεάν αναφορές Waze.";
-        } else {
-          msg = (tomtomError ? tomtomError + "<br><br>" : "") +
-            (wazeError ? wazeError + "<br><br>" : "") +
-            "Καμία ενεργή αναφορά κίνησης σε αυτή την περιοχή αυτή τη στιγμή. " +
-            "Κάνε ζουμ σε πόλη/αυτοκινητόδρομο.";
-        }
-        list.innerHTML = '<div class="empty">' + msg + "</div>";
-        return;
-      }
-      list.innerHTML = "";
-      entries.forEach(e => {
-        const when = new Date(e.t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
-        const div = document.createElement("div");
-        div.className = "a";
-        div.innerHTML = `<span class="ai">${e.ico}</span>` +
-          `<span class="am">${e.main}<br><small>${e.small}</small></span>` +
-          `<span class="at">${when}</span>`;
-        div.onclick = e.go;
-        list.appendChild(div);
-      });
+    // Καρτέλα «Ομάδες»: μηνύματα Viber.
+    function renderGroupsTab(groupItems, rawCount) {
+      const entries = groupItems.map(r => ({
+        ico: r.cls.ico, main: r.m, sub: r.g + (r.place ? " · " + r.place : ""), t: r.t,
+        go: () => { if (r.coords) { map.setView([r.coords.lat, r.coords.lon], 15);
+                    if (alertMarkers[r.id]) alertMarkers[r.id].marker.openPopup(); } },
+      }));
+      const empty = window.AndroidAlerts
+        ? `Ελήφθησαν ${rawCount || 0}. Ενεργοποίησε «Διάβασμα ομάδων» και άνοιξε την ομάδα.`
+        : "Διαθέσιμο μόνο στο APK (ανάγνωση ομάδων).";
+      paintList($("groupsList"), entries, empty);
     }
 
     async function collectGroupAlerts() {
@@ -1354,18 +1413,31 @@
 
     async function refreshAlerts() {
       updateAlertsEnable();
-      await Promise.all([refreshTomTom(), refreshWaze()]);
-      const g = await collectGroupAlerts();
-      renderAlertList(g.items, g.raw);
+      // Παράλληλα: TomTom + Waze + ομάδες μαζί (δεν περιμένει το ένα το άλλο).
+      const [, , g] = await Promise.all([refreshTomTom(), refreshWaze(), collectGroupAlerts()]);
+      renderTrafficTab();
+      renderGroupsTab(g.items, g.raw);
     }
 
     function updateAlertsEnable() {
       const box = $("alertsEnable");
-      if (trafficReady) { box.innerHTML = ""; return; }
-      box.innerHTML = '<div class="empty">🚦 Δώσε το δωρεάν κλειδί TomTom (στο <b>index_osm.html</b>, ' +
-        "μεταβλητή <b>TRAFFIC_KEY</b>) για ζωντανά περιστατικά κίνησης — ατυχήματα, " +
-        "κλειστούς δρόμους, μποτιλιαρίσματα. Οι αναφορές Waze δουλεύουν ούτως ή άλλως.</div>";
+      if (!window.AndroidAlerts) { box.innerHTML = ""; return; }
+      const reader = AndroidAlerts.hasReader && AndroidAlerts.hasReader();
+      if (reader) { box.innerHTML = ""; return; }
+      box.innerHTML = '<button id="readerGrant">📖 Ενεργοποίηση διαβάσματος ομάδων</button>';
+      $("readerGrant").onclick = () => AndroidAlerts.openReaderSettings();
     }
+
+    // ---- Εναλλαγή καρτελών ----
+    document.querySelectorAll("#alertsTabs .tab").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#alertsTabs .tab").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        const t = btn.dataset.tab;
+        $("tabTraffic").hidden = t !== "traffic";
+        $("tabGroups").hidden = t !== "groups";
+      });
+    });
 
     $("alertsBtn").addEventListener("click", () => {
       alertsVisible = !alertsVisible;

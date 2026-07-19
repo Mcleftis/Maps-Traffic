@@ -343,13 +343,10 @@
       return out;
     }
     // Χρωματίζει τη διαδρομή: δειγματοληψία κίνησης ανά ~2.5km και ομαδοποίηση.
-    async function colorRouteByTraffic(route) {
-      trafficRouteLayer.clearLayers();
-      if (!trafficReady || !route) { map.removeLayer(trafficRouteLayer); return; }
-      const ll = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      if (ll.length < 2) return;
-      const cum = [0];
-      for (let i = 1; i < ll.length; i++) cum.push(cum[i - 1] + havDist(ll[i - 1], ll[i]));
+    // Δειγματοληψία κίνησης κατά μήκος → χρώμα ΑΝΑ ΤΜΗΜΑ (segment).
+    // ll=[[lat,lon]...], cum=αθροιστικές αποστάσεις. Επιστρέφει colors[] μήκους ll.length-1.
+    async function computeSegColors(ll, cum) {
+      if (!trafficReady || ll.length < 2) return null;
       const total = cum[cum.length - 1], STEP = 2500, MAX = 24;
       const step = Math.max(STEP, total / MAX);
       const samples = [];
@@ -358,23 +355,40 @@
         samples.push({ lat: ll[i][0], lon: ll[i][1] });
       }
       const ratios = await mapLimit(samples, 4, s => flowRatio(s.lat, s.lon));
-      // Χρώμα ανά τμήμα (κοντινότερο δείγμα), ομαδοποίηση ίδιων χρωμάτων.
       const colors = [];
       for (let i = 1; i < ll.length; i++) {
         const mid = (cum[i - 1] + cum[i]) / 2;
         const si = Math.min(ratios.length - 1, Math.max(0, Math.round(mid / step)));
         colors.push(ratioColor(ratios[si] != null ? ratios[si] : 1));
       }
-      trafficRouteLayer.clearLayers();
+      return colors;
+    }
+
+    // Ζωγραφίζει ομαδοποιημένα χρωματιστά τμήματα (ίδια χρώματα → μία γραμμή).
+    function paintSegments(pts, colors, layer) {
+      layer.clearLayers();
       let start = 0;
       for (let i = 1; i <= colors.length; i++) {
         if (i === colors.length || colors[i] !== colors[start]) {
-          L.polyline(ll.slice(start, i + 1),
-            { color: colors[start], weight: 7, opacity: 0.95 }).addTo(trafficRouteLayer);
+          L.polyline(pts.slice(start, i + 1),
+            { color: colors[start], weight: 7, opacity: 0.95 }).addTo(layer);
           start = i;
         }
       }
-      trafficRouteLayer.addTo(map);
+      layer.addTo(map);
+    }
+
+    // Χρωματισμός ΟΛΟΚΛΗΡΗΣ διαδρομής (προβολή σχεδιασμού, πριν την πλοήγηση).
+    async function colorRouteByTraffic(route) {
+      trafficRouteLayer.clearLayers();
+      if (!trafficReady || !route) { map.removeLayer(trafficRouteLayer); return; }
+      const ll = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      if (ll.length < 2) return;
+      const cum = [0];
+      for (let i = 1; i < ll.length; i++) cum.push(cum[i - 1] + havDist(ll[i - 1], ll[i]));
+      const colors = await computeSegColors(ll, cum);
+      if (!colors) { map.removeLayer(trafficRouteLayer); return; }
+      paintSegments(ll, colors, trafficRouteLayer);
     }
 
     // Υπόμνημα χρωμάτων κίνησης (εμφανίζεται όταν το layer είναι ενεργό).
@@ -748,6 +762,7 @@
       if (nav.active) {
         // Επαναϋπολογισμός εν κινήσει: νέα δεδομένα πλοήγησης, χωρίς fitBounds.
         await buildNavData(routeLines[0].route);
+        refreshNavColors(true);          // νέα χρώματα κίνησης για τη νέα διαδρομή
       } else {
         map.fitBounds(routeLines[0].line.getBounds(), { padding: [40, 40] });
         showRouteInfo(0);
@@ -842,6 +857,7 @@
       active: false, watchId: null, muted: false, firstFix: false,
       pts: [], cum: [], mans: [], total: 0, duration: 0,
       lastPos: null, offCount: 0, recalcing: false, snapIdx: 0,
+      segColors: null, lastAlong: 0, lastColorRefresh: 0,   // χρώματα κίνησης εν κινήσει
       announced: {},                     // ανά ελιγμό: 1=προαναγγέλθηκε, 2=τελική
     };
 
@@ -984,6 +1000,35 @@
       const ahead = [pointAtAlong(along)];
       for (; i < nav.pts.length; i++) ahead.push(nav.pts[i]);
       routeLines[0].line.setLatLngs(ahead);
+      drawAheadColored(along);           // + χρώματα κίνησης πάνω στο μπροστινό
+    }
+
+    // Χρωματίζει με την κίνηση ΜΟΝΟ το κομμάτι μπροστά μας (μαζί με το σβήσιμο).
+    function drawAheadColored(along) {
+      if (!nav.active || !nav.segColors) return;
+      let i0 = 0;
+      while (i0 < nav.cum.length && nav.cum[i0] < along) i0++;
+      const pts = [pointAtAlong(along)];
+      const cols = [];
+      for (let i = Math.max(1, i0); i < nav.pts.length; i++) {
+        pts.push(nav.pts[i]);
+        cols.push(nav.segColors[i - 1]);
+      }
+      if (cols.length) paintSegments(pts, cols, trafficRouteLayer);
+      else { trafficRouteLayer.clearLayers(); }
+    }
+
+    // (Επανα)υπολογισμός χρωμάτων κίνησης για την ενεργή διαδρομή πλοήγησης.
+    // clear=true όταν ΑΛΛΑΞΕ η διαδρομή (έναρξη/επαναϋπολογισμός) — τότε τα
+    // παλιά χρώματα δεν ταιριάζουν στα νέα σημεία και πρέπει να σβηστούν.
+    // clear=false στην περιοδική ανανέωση (ίδια διαδρομή) — χωρίς τρεμόπαιγμα.
+    async function refreshNavColors(clear) {
+      nav.lastColorRefresh = Date.now();
+      if (clear) { nav.segColors = null; trafficRouteLayer.clearLayers(); }
+      const colors = await computeSegColors(nav.pts, nav.cum);
+      if (!nav.active) return;
+      nav.segColors = colors;            // τα επόμενα trims θα τα ζωγραφίσουν
+      if (colors && nav.lastAlong != null) drawAheadColored(nav.lastAlong);
     }
 
     // Προβολή θέσης πάνω στη διαδρομή: απόσταση κατά μήκος + απόκλιση.
@@ -1080,12 +1125,13 @@
 
       nav.active = true;
       nav.lastPos = null;
+      nav.lastAlong = 0;
       nav.firstFix = true;
       setFollow(true);
-      // Στην πλοήγηση η μπλε γραμμή «σβήνει» πίσω μας· κρύψε το χρωματιστό
-      // overlay για να μη συγκρούεται με το trimming (η κίνηση φαίνεται
-      // από το tile overlay + τα περιστατικά).
-      trafficRouteLayer.clearLayers(); map.removeLayer(trafficRouteLayer);
+      // Στην πλοήγηση η μπλε γραμμή «σβήνει» πίσω μας ΚΑΙ το κομμάτι μπροστά
+      // χρωματίζεται με την κίνηση (κίτρινο/κόκκινο) — μαζί, όχι το ένα ή το άλλο.
+      trafficRouteLayer.clearLayers();
+      refreshNavColors(true);            // async· τα trims ζωγραφίζουν όταν έρθει
       // Ενημέρωσε το Android ώστε να επιτρέψει το «μικρό παράθυρο» (PiP).
       if (window.AndroidApp && AndroidApp.setNavigating) AndroidApp.setNavigating(true);
       // Στην πλοήγηση οι ζωντανές αναφορές (Waze) ανάβουν αυτόματα.
@@ -1115,10 +1161,12 @@
     function stopNavigation() {
       if (!nav.active) return;
       nav.active = false;
+      nav.segColors = null;
       if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
       nav.watchId = null;
       if (window.speechSynthesis) speechSynthesis.cancel();
       if (window.AndroidApp && AndroidApp.setNavigating) AndroidApp.setNavigating(false);
+      trafficRouteLayer.clearLayers(); map.removeLayer(trafficRouteLayer);
       setFollow(true);                   // κρύψε το κουμπί επανακέντρου
       $("panel").style.display = "flex";
       $("navBanner").style.display = "none";
@@ -1193,7 +1241,12 @@
       if (nav.recalcing) return;         // περίμενε να έρθει η νέα διαδρομή
 
       // Σβήσε το κομμάτι που ήδη διανύθηκε — κράτα ορατό μόνο το μπροστά.
+      nav.lastAlong = snap.along;
       if (!nav.recalcing && routeLines.length) trimRouteAhead(snap.along);
+
+      // Κράτα φρέσκα τα χρώματα κίνησης (ίδια διαδρομή) ανά ~2,5 λεπτά.
+      if (trafficReady && !nav.recalcing && Date.now() - (nav.lastColorRefresh || 0) > 150000)
+        refreshNavColors(false);
 
       // Φωνητική προειδοποίηση για περιστατικά κίνησης / τροχαία κοντά σου.
       warnNearbyTomTom(p);

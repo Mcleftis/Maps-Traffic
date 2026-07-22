@@ -174,11 +174,18 @@
       box-shadow: 0 3px 10px rgba(0,0,0,.4);
       align-items: center; justify-content: center;
     }
+    #fasterBtn {
+      display: none; position: absolute; left: 50%; transform: translateX(-50%);
+      top: 78px; z-index: 1600; border: none; border-radius: 22px;
+      padding: 10px 18px; font-size: 15px; font-weight: 700; cursor: pointer;
+      background: #188038; color: #fff; box-shadow: 0 3px 10px rgba(0,0,0,.4);
+    }
 
     /* ---- Συμπαγής όψη στο «μικρό παράθυρο» (Picture-in-Picture) ---- */
     body.pip #panel,
     body.pip #navBottom,
     body.pip #recenterBtn,
+    body.pip #fasterBtn,
     body.pip .leaflet-control-container { display: none !important; }
     body.pip #navBanner {
       top: 4px; left: 4px; right: 4px; padding: 6px 8px; gap: 8px; border-radius: 8px;
@@ -262,6 +269,7 @@
         <button id="navStop" title="Τερματισμός">✕</button>
       </div>
       <button id="recenterBtn" title="Επανακέντρο">◎</button>
+      <button id="fasterBtn" title="Άλλαξε σε πιο γρήγορη διαδρομή">🔀 πιο γρήγορη</button>
     </div>
   </div>
 
@@ -454,12 +462,9 @@
                  lat: r.position.lat, lon: r.position.lon };
       }).filter(x => x.lat != null && x.lon != null);
     }
-    async function searchSuggest(query) {
-      if (trafficReady) {
-        try { const r = await ttSearch(query, true, 6); if (r.length) return r; } catch (e) { }
-      }
+    async function photonSearch(query) {
       const c = map.getCenter();
-      const url = `${PHOTON}?q=${encodeURIComponent(query)}&limit=5&lat=${c.lat}&lon=${c.lng}`;
+      const url = `${PHOTON}?q=${encodeURIComponent(query)}&limit=6&lat=${c.lat}&lon=${c.lng}`;
       const results = (await (await fetch(url)).json()).features || [];
       return results.map(f => {
         const p = f.properties;
@@ -467,7 +472,19 @@
           .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
         const [lon, lat] = f.geometry.coordinates;
         return { name: p.name || "", label, lat, lon };
+      }).filter(x => x.lat != null && x.lon != null);
+    }
+    // Συνδυάζει TomTom + OpenStreetMap (Photon) για μέγιστη κάλυψη POI:
+    // ό,τι δεν έχει η μία πηγή μπορεί να το έχει η άλλη.
+    async function searchSuggest(query) {
+      const out = [], seen = new Set();
+      const add = arr => arr.forEach(r => {
+        const k = r.lat.toFixed(4) + "," + r.lon.toFixed(4);
+        if (!seen.has(k)) { seen.add(k); out.push(r); }
       });
+      if (trafficReady) { try { add(await ttSearch(query, true, 6)); } catch (e) { } }
+      if (out.length < 6) { try { add(await photonSearch(query)); } catch (e) { } }
+      return out.slice(0, 8);
     }
 
     function attachAutocomplete(inputId, sugId, setPoint, showMyLoc) {
@@ -962,6 +979,7 @@
       pts: [], cum: [], mans: [], total: 0, duration: 0,
       lastPos: null, offCount: 0, recalcing: false, snapIdx: 0,
       segColors: null, lastAlong: 0, lastColorRefresh: 0,   // χρώματα κίνησης εν κινήσει
+      lastFasterCheck: 0, fasterCandidate: null, fasterAnnounced: false,  // «πιο γρήγορη»
       announced: {},                     // ανά ελιγμό: 1=προαναγγέλθηκε, 2=τελική
     };
 
@@ -1135,6 +1153,52 @@
       if (colors && nav.lastAlong != null) drawAheadColored(nav.lastAlong);
     }
 
+    // ---- «Πιο γρήγορη διαδρομή» εν κινήσει (σαν Google Maps) -----------
+    // Κάθε ~90 δλ ζητά την καλύτερη traffic-aware διαδρομή από ΤΩΡΑ προς τον
+    // προορισμό. Αν κερδίζει αισθητό χρόνο (λόγω κίνησης μπροστά), δείχνει
+    // κουμπί για αλλαγή — δεν αλλάζει μόνο του, το αποφασίζεις εσύ.
+    async function checkFasterRoute(p, remainSec) {
+      if (!trafficReady || !dest) return;
+      let cand = null;
+      try {
+        const routes = await fetchTomTomRoutes({ lat: p[0], lon: p[1] }, dest, "car");
+        cand = routes && routes[0];
+      } catch (e) { return; }
+      if (!nav.active || !cand) return;
+      const save = remainSec - cand.duration;
+      // Άξιζει μόνο αν κερδίζει ≥ 2 λεπτά ΚΑΙ ≥ 12% του υπόλοιπου χρόνου.
+      if (save >= 120 && save >= remainSec * 0.12) {
+        nav.fasterCandidate = cand;
+        const b = $("fasterBtn");
+        b.textContent = "🔀 πιο γρήγορη −" + Math.round(save / 60) + "′";
+        b.style.display = "block";
+        if (!nav.fasterAnnounced) { nav.fasterAnnounced = true; speak("Βρέθηκε πιο γρήγορη διαδρομή."); }
+      } else {
+        nav.fasterCandidate = null;
+        nav.fasterAnnounced = false;
+        $("fasterBtn").style.display = "none";
+      }
+    }
+
+    // Αλλαγή στην προτεινόμενη πιο γρήγορη διαδρομή (με το άγγιγμα του κουμπιού).
+    async function switchToFaster() {
+      const cand = nav.fasterCandidate;
+      if (!cand) return;
+      nav.fasterCandidate = null;
+      nav.fasterAnnounced = false;
+      $("fasterBtn").style.display = "none";
+      clearRoutes();
+      const latlngs = cand.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      const line = L.polyline(latlngs, { color: "#1a73e8", weight: 6, opacity: 0.95 }).addTo(map);
+      routeLines = [{ line, route: cand }];
+      activeIdx = 0;
+      await buildNavData(cand);
+      refreshNavColors(true);
+      nav.lastFasterCheck = Date.now();    // μη ξαναπροτείνει αμέσως
+      speak("Άλλαξα σε πιο γρήγορη διαδρομή.");
+    }
+    $("fasterBtn").addEventListener("click", switchToFaster);
+
     // Προβολή θέσης πάνω στη διαδρομή: απόσταση κατά μήκος + απόκλιση.
     // Βελτιστοποίηση: αντί να σαρώνουμε ΟΛΑ τα σημεία κάθε δευτερόλεπτο,
     // ψάχνουμε μόνο σε ένα παράθυρο γύρω από την τελευταία θέση (nav.snapIdx).
@@ -1266,6 +1330,8 @@
       if (!nav.active) return;
       nav.active = false;
       nav.segColors = null;
+      nav.fasterCandidate = null;
+      $("fasterBtn").style.display = "none";
       if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
       nav.watchId = null;
       if (window.speechSynthesis) speechSynthesis.cancel();
@@ -1348,8 +1414,8 @@
       nav.lastAlong = snap.along;
       if (!nav.recalcing && routeLines.length) trimRouteAhead(snap.along);
 
-      // Κράτα φρέσκα τα χρώματα κίνησης (ίδια διαδρομή) ανά ~2,5 λεπτά.
-      if (trafficReady && !nav.recalcing && Date.now() - (nav.lastColorRefresh || 0) > 150000)
+      // Συνεχής σάρωση κίνησης: φρέσκα χρώματα διαδρομής ανά ~60 δλ.
+      if (trafficReady && !nav.recalcing && Date.now() - (nav.lastColorRefresh || 0) > 60000)
         refreshNavColors(false);
 
       // Φωνητική προειδοποίηση για περιστατικά κίνησης / τροχαία κοντά σου.
@@ -1400,6 +1466,13 @@
       $("navStats").innerHTML =
         `<strong>${fmtDist(remaining)}</strong> · ${fmtDur(remainSec)} · άφιξη ${etaStr}` +
         (spdKmh != null ? ` · ${spdKmh} km/h` : "");
+
+      // Συνεχής έλεγχος για πιο γρήγορη διαδρομή ανά ~90 δλ (μόνο αυτοκίνητο).
+      if (trafficReady && mode === "car" && !nav.recalcing
+          && Date.now() - (nav.lastFasterCheck || 0) > 90000) {
+        nav.lastFasterCheck = Date.now();
+        checkFasterRoute(p, remainSec);
+      }
     }
 
     // ====================================================================

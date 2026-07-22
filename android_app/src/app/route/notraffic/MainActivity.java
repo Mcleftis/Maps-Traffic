@@ -51,6 +51,7 @@ public class MainActivity extends Activity {
     private AudioFocusRequest audioFocusReq;   // API 26+
     private volatile boolean navigating = false;
     private static final int REQ_VOICE = 42;
+    private static final int REQ_MIC = 43;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -159,20 +160,33 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void startVoiceSearch() {
             runOnUiThread(new Runnable() {
-                @Override public void run() {
-                    try {
-                        Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-                        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-                        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "el-GR");
-                        i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Πες τον προορισμό");
-                        startActivityForResult(i, REQ_VOICE);
-                    } catch (Exception e) {
-                        // Καμία μηχανή αναγνώρισης — καθάρισε την ένδειξη.
-                        if (web != null) web.evaluateJavascript("onVoiceResult('')", null);
-                    }
-                }
+                @Override public void run() { requestMicThenListen(); }
             });
+        }
+    }
+
+    /** Ζητά άδεια μικροφώνου (αν λείπει) και μετά ανοίγει την αναγνώριση φωνής. */
+    private void requestMicThenListen() {
+        if (Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] { Manifest.permission.RECORD_AUDIO }, REQ_MIC);
+            return;                            // θα ξαναδοκιμάσει μετά την απάντηση
+        }
+        launchVoice();
+    }
+
+    private void launchVoice() {
+        try {
+            Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "el-GR");
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "el-GR");
+            i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Πες τον προορισμό");
+            startActivityForResult(i, REQ_VOICE);
+        } catch (Exception e) {
+            if (web != null) web.evaluateJavascript("onVoiceResult('')", null);
         }
     }
 
@@ -316,6 +330,13 @@ public class MainActivity extends Activity {
             pendingGeoCallback.invoke(pendingGeoOrigin, hasLocationPermission(), false);
             pendingGeoCallback = null;
             pendingGeoOrigin = null;
+        } else if (requestCode == REQ_MIC) {
+            if (grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                launchVoice();                 // άδεια δόθηκε → άκου τώρα
+            } else if (web != null) {
+                web.evaluateJavascript("onVoiceResult('')", null);   // καθάρισε ένδειξη
+            }
         }
     }
 

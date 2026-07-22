@@ -11,6 +11,7 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
+import android.speech.RecognizerIntent;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -27,6 +28,9 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import org.json.JSONObject;
+
+import java.util.ArrayList;
 import java.util.Locale;
 
 /**
@@ -46,6 +50,7 @@ public class MainActivity extends Activity {
     private AudioManager audioManager;
     private AudioFocusRequest audioFocusReq;   // API 26+
     private volatile boolean navigating = false;
+    private static final int REQ_VOICE = 42;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -148,6 +153,26 @@ public class MainActivity extends Activity {
         public boolean pipSupported() {
             return Build.VERSION.SDK_INT >= 26 && getPackageManager()
                     .hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+        }
+
+        // Φωνητική αναζήτηση προορισμού (ελληνικά) μέσω του Google speech UI.
+        @JavascriptInterface
+        public void startVoiceSearch() {
+            runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "el-GR");
+                        i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Πες τον προορισμό");
+                        startActivityForResult(i, REQ_VOICE);
+                    } catch (Exception e) {
+                        // Καμία μηχανή αναγνώρισης — καθάρισε την ένδειξη.
+                        if (web != null) web.evaluateJavascript("onVoiceResult('')", null);
+                    }
+                }
+            });
         }
     }
 
@@ -301,6 +326,24 @@ public class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req != REQ_VOICE || web == null) return;
+        String spoken = "";
+        if (res == RESULT_OK && data != null) {
+            ArrayList<String> r =
+                    data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+            if (r != null && !r.isEmpty()) spoken = r.get(0);
+        }
+        // JSONObject.quote → ασφαλές, escaped string literal για το JS.
+        final String js = "window.onVoiceResult && onVoiceResult("
+                + JSONObject.quote(spoken) + ")";
+        web.post(new Runnable() {
+            @Override public void run() { web.evaluateJavascript(js, null); }
+        });
     }
 
     @Override

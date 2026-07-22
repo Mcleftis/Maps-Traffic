@@ -20,6 +20,14 @@
       width: 100%; padding: 10px 12px; font-size: 16px;
       border: 1px solid #ccc; border-radius: 6px;
     }
+    #destination { padding-right: 46px; }
+    .micbtn {
+      position: absolute; right: 6px; top: 5px; width: 36px; height: 36px;
+      border: none; border-radius: 6px; background: #eef3fd; font-size: 18px;
+      cursor: pointer; z-index: 2;
+    }
+    .micbtn.listening { background: #fdd; animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: .5; } }
     .suggestions {
       position: absolute; top: 100%; left: 0; right: 0; z-index: 1200;
       background: #fff; border: 1px solid #ddd; border-top: none;
@@ -201,6 +209,7 @@
       </div>
       <div class="inputwrap">
         <input id="destination" type="text" placeholder="Προορισμός" autocomplete="off">
+        <button id="voiceBtn" class="micbtn" title="Φωνητική αναζήτηση προορισμού">🎤</button>
         <div class="suggestions" id="destSug"></div>
       </div>
       <div id="modes">
@@ -266,7 +275,8 @@
     //     κίνηση και προτείνει διαφορετικό δρόμο αν ο κύριος έχει
     //     μποτιλιάρισμα (μόνο αυτοκίνητο, χρειάζεται το ίδιο κλειδί TomTom
     //     με το traffic overlay/περιστατικά πιο κάτω).
-    // Geocoding/autocomplete: Photon + Nominatim (δωρεάν, χωρίς κλειδί).
+    // Αναζήτηση/autocomplete: TomTom Search (πλούσια βάση POI, ίδιο κλειδί)
+    //   με fallback σε Photon/Nominatim αν λείπει κλειδί ή αποτύχει.
     // Ζωντανή πλοήγηση: watchPosition + προβολή θέσης πάνω στη διαδρομή.
     // ====================================================================
     const PROFILES = {
@@ -425,6 +435,41 @@
     const resultEl = $("result"), stepsEl = $("steps"), stepsToggle = $("stepsToggle");
 
     // ---- Autocomplete (Photon) ------------------------------------------
+    // ---- Αναζήτηση POI/διευθύνσεων -------------------------------------
+    // Προτίμηση TomTom Search (τεράστια βάση επιχειρήσεων/POI, ~Google) με
+    // το ίδιο κλειδί· fallback σε Photon/Nominatim αν λείπει κλειδί ή αποτύχει.
+    // Επιστρέφει ενιαία μορφή: [{ name, label, lat, lon }].
+    async function ttSearch(query, typeahead, limit) {
+      const c = map.getCenter();
+      const url = "https://api.tomtom.com/search/2/search/" +
+        encodeURIComponent(query) + ".json?key=" + TRAFFIC_KEY +
+        "&limit=" + (limit || 6) + "&countrySet=GR&language=el-GR" +
+        "&lat=" + c.lat + "&lon=" + c.lng + (typeahead ? "&typeahead=true" : "");
+      const data = await (await fetch(url)).json();
+      return (data.results || []).map(r => {
+        const name = (r.poi && r.poi.name) || "";
+        const addr = (r.address && r.address.freeformAddress) || "";
+        const label = name ? (addr ? name + ", " + addr : name) : addr;
+        return { name, label: label || (r.position.lat + ", " + r.position.lon),
+                 lat: r.position.lat, lon: r.position.lon };
+      }).filter(x => x.lat != null && x.lon != null);
+    }
+    async function searchSuggest(query) {
+      if (trafficReady) {
+        try { const r = await ttSearch(query, true, 6); if (r.length) return r; } catch (e) { }
+      }
+      const c = map.getCenter();
+      const url = `${PHOTON}?q=${encodeURIComponent(query)}&limit=5&lat=${c.lat}&lon=${c.lng}`;
+      const results = (await (await fetch(url)).json()).features || [];
+      return results.map(f => {
+        const p = f.properties;
+        const label = [p.name, p.street, p.city || p.county, p.country]
+          .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
+        const [lon, lat] = f.geometry.coordinates;
+        return { name: p.name || "", label, lat, lon };
+      });
+    }
+
     function attachAutocomplete(inputId, sugId, setPoint, showMyLoc) {
       const input = $(inputId), sug = $(sugId);
       let timer = null;
@@ -447,28 +492,22 @@
         if (q.length < 3) { sug.style.display = "none"; return; }
         timer = setTimeout(async () => {
           try {
-            const c = map.getCenter();
-            const url = `${PHOTON}?q=${encodeURIComponent(q)}&limit=5&lat=${c.lat}&lon=${c.lng}`;
-            const results = (await (await fetch(url)).json()).features || [];
+            const results = await searchSuggest(q);
             sug.innerHTML = "";
-            results.forEach(f => {
-              const p = f.properties;
-              const label = [p.name, p.street, p.city || p.county, p.country]
-                .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
+            results.forEach(res => {
               const div = document.createElement("div");
-              div.textContent = label;
+              div.textContent = res.label;
               div.onclick = () => {
-                input.value = label;
+                input.value = res.label;
                 sug.style.display = "none";
-                const [lon, lat] = f.geometry.coordinates;
-                setPoint({ lat, lon });
+                setPoint({ lat: res.lat, lon: res.lon });
                 maybeRoute();
               };
               sug.appendChild(div);
             });
             sug.style.display = results.length ? "block" : "none";
           } catch (e) { sug.style.display = "none"; }
-        }, 300);
+        }, 250);
       });
       input.addEventListener("keydown", e => {
         if (e.key === "Enter") { sug.style.display = "none"; calculateRoute(); }
@@ -485,6 +524,12 @@
     async function geocode(query) {
       const key = query.trim().toLowerCase();
       if (geoCache[key]) return geoCache[key];
+      if (trafficReady) {
+        try {
+          const r = await ttSearch(query, false, 1);
+          if (r.length) { const g = { lat: r[0].lat, lon: r[0].lon }; geoCache[key] = g; return g; }
+        } catch (e) { }
+      }
       const url = `${NOMINATIM}/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
       const results = await (await fetch(url, { headers: { "Accept-Language": "el,en" } })).json();
       if (!results.length) throw new Error(`Δεν βρέθηκε: «${query}»`);
@@ -556,6 +601,55 @@
       }, { enableHighAccuracy: true, timeout: 15000 });
     }
     $("locate").addEventListener("click", useMyLocation);
+
+    // ---- Φωνητική αναζήτηση προορισμού ---------------------------------
+    // Native Android αναγνώριση φωνής (αξιόπιστη σε WebView) μέσω γέφυρας·
+    // fallback σε SpeechRecognition του browser για την web έκδοση.
+    function startVoiceSearch() {
+      if (window.AndroidApp && AndroidApp.startVoiceSearch) {
+        $("voiceBtn").classList.add("listening");
+        AndroidApp.startVoiceSearch();     // το onVoiceResult θα κληθεί από το native
+        return;
+      }
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) {
+        resultEl.innerHTML = '<span class="error">Η φωνητική αναζήτηση δεν υποστηρίζεται εδώ.</span>';
+        return;
+      }
+      const rec = new SR();
+      rec.lang = "el-GR"; rec.interimResults = false; rec.maxAlternatives = 1;
+      $("voiceBtn").classList.add("listening");
+      resultEl.textContent = "🎤 Άκουσμα…";
+      rec.onresult = e => onVoiceResult(e.results[0][0].transcript);
+      rec.onerror = () => { $("voiceBtn").classList.remove("listening"); resultEl.textContent = ""; };
+      rec.onend = () => $("voiceBtn").classList.remove("listening");
+      rec.start();
+    }
+    // Καλείται είτε από το browser SpeechRecognition είτε από το native Android.
+    window.onVoiceResult = async function (text) {
+      $("voiceBtn").classList.remove("listening");
+      text = (text || "").trim();
+      if (!text) { resultEl.textContent = ""; return; }
+      const input = $("destination");
+      input.value = text;
+      resultEl.textContent = "🔎 " + text + "…";
+      try {
+        const results = await searchSuggest(text);
+        if (!results.length) {
+          resultEl.innerHTML = `<span class="error">Δεν βρέθηκε: «${text}»</span>`;
+          return;
+        }
+        const r = results[0];
+        input.value = r.label;
+        dest = { lat: r.lat, lon: r.lon };
+        placeMarker("B", dest);
+        resultEl.textContent = "";
+        maybeRoute();
+      } catch (e) {
+        resultEl.innerHTML = '<span class="error">Σφάλμα φωνητικής αναζήτησης.</span>';
+      }
+    };
+    $("voiceBtn").addEventListener("click", startVoiceSearch);
 
     // ---- Λειτουργίες μετακίνησης ----------------------------------------
     // Το checkbox «Αποφυγή κίνησης» δουλεύει μόνο με αυτοκίνητο + κλειδί TomTom.
@@ -676,7 +770,7 @@
         `${o.lat},${o.lon}:${d.lat},${d.lon}/json` +
         `?key=${TRAFFIC_KEY}&traffic=true&routeType=fastest&travelMode=${travelMode}` +
         `&instructionsType=coded&language=el-GR` +
-        `&maxAlternatives=${nav.active ? 0 : 2}`;
+        `&maxAlternatives=${nav.active ? 0 : 4}`;   // έως 5 διαδρομές συνολικά
       const resp = await fetch(url);
       if (!resp.ok) throw new Error("TomTom HTTP " + resp.status);
       const data = await resp.json();
@@ -686,7 +780,7 @@
 
     async function fetchOSRMRoutes(o, d, tmode) {
       const url = `${PROFILES[tmode]}/${o.lon},${o.lat};${d.lon},${d.lat}` +
-        `?overview=full&geometries=geojson&alternatives=${nav.active ? "false" : "true"}&steps=true`;
+        `?overview=full&geometries=geojson&alternatives=${nav.active ? "false" : "4"}&steps=true`;
       const data = await (await fetch(url)).json();
       if (data.code !== "Ok" || !data.routes.length)
         throw new Error("Δεν βρέθηκε διαδρομή μεταξύ αυτών των σημείων.");

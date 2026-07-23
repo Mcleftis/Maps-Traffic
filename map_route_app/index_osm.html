@@ -763,9 +763,14 @@
         const next = instr[i + 1];
         const dist = next
           ? Math.max(0, (next.routeOffsetInMeters || 0) - (ins.routeOffsetInMeters || 0)) : 0;
+        // travelTimeInSeconds είναι αθροιστικός χρόνος (όπως το routeOffsetInMeters
+        // για την απόσταση) — χρειάζεται για τον ΣΩΣΤΟ υπολογισμό υπολειπόμενου
+        // χρόνου ανά τμήμα δρόμου, όχι μέσο όρο όλης της διαδρομής.
+        const dur = next
+          ? Math.max(0, (next.travelTimeInSeconds || 0) - (ins.travelTimeInSeconds || 0)) : 0;
         const step = {
           name: ins.street || (ins.roadNumbers && ins.roadNumbers[0]) || "",
-          distance: dist,
+          distance: dist, duration: dur,
           maneuver: { type, modifier, location: [ins.point.longitude, ins.point.latitude] },
         };
         if (ins.roundaboutExitNumber) step.maneuver.exit = ins.roundaboutExitNumber;
@@ -1047,9 +1052,11 @@
         'var pts=coords.map(function(c){return [c[1],c[0]];});' +
         'var cum=[0];for(var i=1;i<pts.length;i++)cum.push(cum[i-1]+hav(pts[i-1],pts[i]));' +
         'var total=cum.length?cum[cum.length-1]:0;' +
-        'var mans=steps.map(function(s){var ml=[s.maneuver.location[1],s.maneuver.location[0]];' +
+        // ΣΩΣΤΟΣ υπολειπόμενος χρόνος: αθροιστικός χρόνος ΑΝΑ ΤΜΗΜΑ (όχι μέσος
+        // όρος όλης της διαδρομής) — timeAt[k] = χρόνος μέχρι το mans[k].
+        'var timeAcc=0,mans=steps.map(function(s){var ml=[s.maneuver.location[1],s.maneuver.location[0]];' +
         'var best=0,bd=Infinity;for(var i=0;i<pts.length;i++){var d=hav(pts[i],ml);if(d<bd){bd=d;best=i;}}' +
-        'return {step:s,at:cum[best]||0};});' +
+        'timeAcc+=(s.duration||0);return {step:s,at:cum[best]||0,timeAt:timeAcc};});' +
         'self.postMessage({pts:pts,cum:cum,total:total,mans:mans});};';
       navWorker = new Worker(URL.createObjectURL(
         new Blob([workerSrc], { type: "application/javascript" })));
@@ -1062,6 +1069,7 @@
         nav.cum.push(nav.cum[i - 1] + havDist(nav.pts[i - 1], nav.pts[i]));
       nav.total = nav.cum[nav.cum.length - 1] || 0;
       const steps = (route.legs || []).flatMap(l => l.steps || []);
+      let timeAcc = 0;
       nav.mans = steps.map(s => {
         const ml = [s.maneuver.location[1], s.maneuver.location[0]];
         let best = 0, bd = Infinity;
@@ -1069,7 +1077,8 @@
           const d = havDist(nav.pts[i], ml);
           if (d < bd) { bd = d; best = i; }
         }
-        return { step: s, at: nav.cum[best] || 0 };
+        timeAcc += s.duration || 0;
+        return { step: s, at: nav.cum[best] || 0, timeAt: timeAcc };
       });
     }
 
@@ -1099,6 +1108,27 @@
           steps: (route.legs || []).flatMap(l => l.steps || []),
         });
       });
+    }
+
+    // Χρόνος (σε δλ) μέχρι μια δεδομένη απόσταση κατά μήκος της διαδρομής,
+    // με γραμμική παρεμβολή ΑΝΑ ΤΜΗΜΑ (μεταξύ διαδοχικών ελιγμών) — όχι μέσος
+    // όρος όλης της διαδρομής. Αυτό δίνει σωστό υπολειπόμενο χρόνο: αν έχεις
+    // ήδη περάσει το γρήγορο κομμάτι (αυτοκινητόδρομος), το υπόλοιπο σου
+    // υπολογίζεται με την πραγματική (αργή) ταχύτητα του δρόμου μπροστά σου.
+    function timeAtAlong(along) {
+      if (!nav.mans || !nav.mans.length) return null;   // χωρίς δεδομένα βημάτων
+      if (along <= 0) return 0;
+      let prevD = 0, prevT = 0;
+      for (let i = 0; i < nav.mans.length; i++) {
+        const d = nav.mans[i].at, t = nav.mans[i].timeAt;
+        if (d >= along) {
+          const seg = d - prevD;
+          const frac = seg > 0 ? (along - prevD) / seg : 0;
+          return prevT + frac * (t - prevT);
+        }
+        prevD = d; prevT = t;
+      }
+      return prevT;                       // πέρα από τον τελευταίο ελιγμό
     }
 
     // Σημείο πάνω στη διαδρομή σε δεδομένη απόσταση κατά μήκος (μέτρα).
@@ -1460,7 +1490,14 @@
       }
 
       // Κάτω μπάρα: υπόλοιπο + εκτίμηση άφιξης.
-      const remainSec = nav.duration * (remaining / nav.total);
+      // ΣΩΣΤΟΣ υπολογισμός: χρόνος-μέχρι-τέλος μείον χρόνο-μέχρι-εδώ, με βάση
+      // τα πραγματικά τμήματα δρόμου μπροστά (όχι απλή αναλογία απόστασης).
+      const totalTime = nav.mans && nav.mans.length
+        ? nav.mans[nav.mans.length - 1].timeAt : nav.duration;
+      const tAt = timeAtAlong(snap.along);
+      const remainSec = tAt != null
+        ? Math.max(0, totalTime - tAt)
+        : nav.duration * (remaining / nav.total);   // fallback αν λείπουν βήματα
       const eta = new Date(Date.now() + remainSec * 1000);
       const etaStr = eta.toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
       $("navStats").innerHTML =

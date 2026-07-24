@@ -1056,7 +1056,7 @@
         // όρος όλης της διαδρομής) — timeAt[k] = χρόνος μέχρι το mans[k].
         'var timeAcc=0,mans=steps.map(function(s){var ml=[s.maneuver.location[1],s.maneuver.location[0]];' +
         'var best=0,bd=Infinity;for(var i=0;i<pts.length;i++){var d=hav(pts[i],ml);if(d<bd){bd=d;best=i;}}' +
-        'timeAcc+=(s.duration||0);return {step:s,at:cum[best]||0,timeAt:timeAcc};});' +
+        'var rec={step:s,at:cum[best]||0,timeAt:timeAcc};timeAcc+=(s.duration||0);return rec;});' +
         'self.postMessage({pts:pts,cum:cum,total:total,mans:mans});};';
       navWorker = new Worker(URL.createObjectURL(
         new Blob([workerSrc], { type: "application/javascript" })));
@@ -1077,8 +1077,11 @@
           const d = havDist(nav.pts[i], ml);
           if (d < bd) { bd = d; best = i; }
         }
+        // timeAt = χρόνος για να ΦΤΑΣΕΙΣ αυτόν τον ελιγμό (πριν προστεθεί η
+        // δική του διάρκεια) — αλλιώς μετατοπίζεται κατά ένα βήμα.
+        const rec = { step: s, at: nav.cum[best] || 0, timeAt: timeAcc };
         timeAcc += s.duration || 0;
-        return { step: s, at: nav.cum[best] || 0, timeAt: timeAcc };
+        return rec;
       });
     }
 

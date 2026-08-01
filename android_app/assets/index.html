@@ -138,6 +138,20 @@
       color: #333; padding: 4px 2px; cursor: pointer;
     }
     #viberMapToggle input { width: 15px; height: 15px; flex: none; }
+    #relayToggle {
+      width: 100%; padding: 6px; margin: 2px 0; font-size: 12px; font-weight: 600;
+      border: 1px solid #ccc; border-radius: 6px; background: #f5f5f5;
+      color: #444; cursor: pointer;
+    }
+    #relayBox { padding: 4px 0; }
+    #relayBox select, #relayBox input {
+      width: 100%; padding: 7px 8px; margin: 3px 0; font-size: 12px;
+      border: 1px solid #ccc; border-radius: 6px;
+    }
+    #relayBox button {
+      width: 100%; padding: 8px; margin: 3px 0; border: none; border-radius: 6px;
+      background: #1a73e8; color: #fff; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
     #alertsEnable { font-size: 12px; }
     #alertsEnable button {
       width: 100%; padding: 7px; margin: 2px 0 4px; border: none; border-radius: 6px;
@@ -258,6 +272,18 @@
             <input type="checkbox" id="viberOnMap" checked>
             <span>📍 Εμφάνιση ειδοποιήσεων Viber στον χάρτη (σαν Waze)</span>
           </label>
+          <button id="relayToggle">🔗 Κοινή χρήση με άλλη συσκευή…</button>
+          <div id="relayBox" hidden>
+            <select id="relayMode">
+              <option value="off">Ανενεργό</option>
+              <option value="send">Αποστολέας — αυτό το κινητό έχει Viber</option>
+              <option value="recv">Παραλήπτης — αυτό δεν έχει Viber</option>
+            </select>
+            <input id="relayUrl" type="text" placeholder="URL του Worker (https://….workers.dev)" autocomplete="off">
+            <input id="relayKey" type="text" placeholder="Μυστικό κλειδί (SHARED_KEY)" autocomplete="off">
+            <button id="relaySave">Αποθήκευση & δοκιμή</button>
+            <div id="relayStatus" class="empty"></div>
+          </div>
           <div id="alertsEnable"></div>
           <div id="groupsList" class="alist"></div>
         </div>
@@ -1634,6 +1660,39 @@
     }
     $("viberOnMap").addEventListener("change", applyViberOnMap);
 
+    // ---- Ρυθμίσεις κοινής χρήσης (relay) ----
+    $("relayToggle").addEventListener("click", () => {
+      const box = $("relayBox");
+      box.hidden = !box.hidden;
+      if (!box.hidden) {
+        $("relayMode").value = localStorage.getItem("relayMode") || "off";
+        $("relayUrl").value = localStorage.getItem("relayUrl") || "";
+        $("relayKey").value = localStorage.getItem("relayKey") || "";
+      }
+    });
+    $("relaySave").addEventListener("click", async () => {
+      const mode = $("relayMode").value;
+      const url = $("relayUrl").value.trim().replace(/\/+$/, "");
+      const key = $("relayKey").value.trim();
+      localStorage.setItem("relayMode", mode);
+      localStorage.setItem("relayUrl", url);
+      localStorage.setItem("relayKey", key);
+      const st = $("relayStatus");
+      if (mode === "off") { st.textContent = "Ανενεργό."; return; }
+      if (!url || !key) { st.textContent = "Συμπλήρωσε URL και κλειδί."; return; }
+      st.textContent = "Δοκιμή σύνδεσης…";
+      try {
+        const resp = await fetch(url + "?key=" + encodeURIComponent(key));
+        if (resp.status === 403) { st.textContent = "❌ Λάθος κλειδί."; return; }
+        if (!resp.ok) { st.textContent = "❌ Σφάλμα " + resp.status + "."; return; }
+        const data = await resp.json();
+        st.textContent = "✅ Σύνδεση OK — " + ((data.items || []).length) + " αναφορές στον server.";
+        refreshAlerts();
+      } catch (e) {
+        st.textContent = "❌ Δεν βρέθηκε ο server (έλεγξε το URL).";
+      }
+    });
+
     // ------------------------------------------------------------------
     // WAZE LIVE ALERTS — η κύρια πηγή: ζωντανές αναφορές οδηγών (τροχαία,
     // ατυχήματα, κίνδυνοι) με ακριβείς συντεταγμένες. Χωρίς κλειδί.
@@ -1885,13 +1944,66 @@
         go: () => { if (r.coords) { map.setView([r.coords.lat, r.coords.lon], 15);
                     if (alertMarkers[r.id]) alertMarkers[r.id].marker.openPopup(); } },
       }));
-      const empty = window.AndroidAlerts
-        ? `Ελήφθησαν ${rawCount || 0}. Ενεργοποίησε «Διάβασμα ομάδων» και άνοιξε την ομάδα.`
-        : "Διαθέσιμο μόνο στο APK (ανάγνωση ομάδων).";
+      const empty = relayCfg.mode === "recv"
+        ? "Καμία αναφορά από την άλλη συσκευή ακόμα (λαμβάνει από το relay)."
+        : window.AndroidAlerts
+          ? `Ελήφθησαν ${rawCount || 0}. Ενεργοποίησε «Διάβασμα ομάδων» και άνοιξε την ομάδα.`
+          : "Διαθέσιμο μόνο στο APK (ανάγνωση ομάδων).";
       paintList($("groupsList"), entries, empty);
     }
 
+    // ---- Κοινή χρήση αναφορών μεταξύ συσκευών (relay) -------------------
+    // Το κινητό ΜΕ Viber ("send") ανεβάζει τις αναφορές· όσα δεν έχουν Viber
+    // ("recv") τις κατεβάζουν. Ρυθμίσεις στο localStorage (καρτέλα Ομάδες).
+    const relayCfg = {
+      get url()  { return localStorage.getItem("relayUrl") || ""; },
+      get key()  { return localStorage.getItem("relayKey") || ""; },
+      get mode() { return localStorage.getItem("relayMode") || "off"; },
+    };
+    const relaySent = {};                // id → στάλθηκε ήδη (μη ξαναγράφει)
+
+    async function relayPush(items) {
+      if (relayCfg.mode !== "send" || !relayCfg.url) return;
+      const fresh = items.filter(r => r.coords && !relaySent[r.id]);
+      if (!fresh.length) return;         // τίποτα νέο → καμία εγγραφή
+      try {
+        const body = fresh.map(r => ({
+          id: r.id, t: r.t, g: r.g, m: r.m,
+          lat: r.coords.lat, lon: r.coords.lon,
+          ico: r.cls.ico, label: r.cls.label,
+        }));
+        const resp = await fetch(relayCfg.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-key": relayCfg.key },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) fresh.forEach(r => { relaySent[r.id] = true; });
+      } catch (e) { /* χωρίς δίκτυο — θα ξαναδοκιμάσει */ }
+    }
+
+    async function relayPull() {
+      if (relayCfg.mode !== "recv" || !relayCfg.url) return [];
+      try {
+        const resp = await fetch(relayCfg.url + "?key=" + encodeURIComponent(relayCfg.key));
+        if (!resp.ok) return [];
+        const data = await resp.json();
+        return (data.items || [])
+          .filter(a => Date.now() - a.t <= ALERT_MAX_AGE)
+          .map(a => ({
+            id: a.id, t: a.t, g: a.g, m: a.m, place: "",
+            cls: { ico: a.ico, label: a.label, type: "relay" },
+            coords: { lat: a.lat, lon: a.lon },
+          }));
+      } catch (e) { return []; }
+    }
+
     async function collectGroupAlerts() {
+      // Παραλήπτης: δεν διαβάζει τοπικά Viber — παίρνει τα πάντα από το relay.
+      if (relayCfg.mode === "recv") {
+        const items = await relayPull();
+        items.forEach(renderAlertMarker);
+        return { items, raw: items.length };
+      }
       if (!window.AndroidAlerts) return { items: [], raw: 0 };
       try { AndroidAlerts.setGroups(WATCH_GROUPS.join("|")); } catch (e) {}
       let raw = [];
@@ -1902,6 +2014,7 @@
         const r = await resolveAlert(a);
         if (r && !seen[r.id]) { seen[r.id] = true; resolved.push(r); renderAlertMarker(r); }
       }
+      relayPush(resolved);               // αποστολέας: ανέβασε ό,τι νέο
       return { items: resolved, raw: raw.length };
     }
 
@@ -1911,10 +2024,13 @@
       const [, , g] = await Promise.all([refreshTomTom(), refreshWaze(), collectGroupAlerts()]);
       renderTrafficTab();
       renderGroupsTab(g.items, g.raw);
+      applyViberOnMap();                 // τα σημάδια Viber ορατά όπου κι αν κληθεί
     }
 
     function updateAlertsEnable() {
       const box = $("alertsEnable");
+      // Ο παραλήπτης δεν διαβάζει Viber — μη ζητάς άδεια που δεν χρειάζεται.
+      if (relayCfg.mode === "recv") { box.innerHTML = ""; return; }
       if (!window.AndroidAlerts) { box.innerHTML = ""; return; }
       const reader = AndroidAlerts.hasReader && AndroidAlerts.hasReader();
       if (reader) { box.innerHTML = ""; return; }

@@ -133,6 +133,11 @@
     }
     #alertsTabs .tab.active { background: #1a73e8; border-color: #1a73e8; color: #fff; }
     #alertsClear { background: none; border: none; font-size: 15px; cursor: pointer; flex: none; padding: 0 2px; }
+    #viberMapToggle {
+      display: flex; align-items: center; gap: 6px; font-size: 12px;
+      color: #333; padding: 4px 2px; cursor: pointer;
+    }
+    #viberMapToggle input { width: 15px; height: 15px; flex: none; }
     #alertsEnable { font-size: 12px; }
     #alertsEnable button {
       width: 100%; padding: 7px; margin: 2px 0 4px; border: none; border-radius: 6px;
@@ -249,6 +254,10 @@
           <div id="trafficList" class="alist"></div>
         </div>
         <div id="tabGroups" class="tabpane" hidden>
+          <label id="viberMapToggle">
+            <input type="checkbox" id="viberOnMap" checked>
+            <span>📍 Εμφάνιση ειδοποιήσεων Viber στον χάρτη (σαν Waze)</span>
+          </label>
           <div id="alertsEnable"></div>
           <div id="groupsList" class="alist"></div>
         </div>
@@ -1337,6 +1346,7 @@
       if (window.AndroidApp && AndroidApp.setNavigating) AndroidApp.setNavigating(true);
       // Στην πλοήγηση οι ζωντανές αναφορές (Waze) ανάβουν αυτόματα.
       alertLayer.addTo(map);
+      applyViberOnMap();                 // + Viber σημάδια αν είναι ενεργά
       refreshAlerts();
       $("panel").style.display = "none";
       $("navBanner").style.display = "flex";
@@ -1527,6 +1537,9 @@
     const ALERT_MAX_AGE = 6 * 3600 * 1000;   // 6 ώρες
 
     const alertMarkers = {};                 // id → {marker, data}
+    // Ξεχωριστό layer ΜΟΝΟ για τα σημάδια Viber, ώστε ο διακόπτης να τα
+    // ανάβει/σβήνει χωρίς να επηρεάζει Waze/TomTom.
+    const viberLayer = L.layerGroup();
     let alertsVisible = false;
     let alertLayer = L.layerGroup();
 
@@ -1610,9 +1623,16 @@
       });
       const when = new Date(r.t).toLocaleTimeString("el-GR", { hour: "2-digit", minute: "2-digit" });
       marker.bindPopup(`<b>${r.cls.ico} ${r.cls.label}</b><br>${r.m}<br><small>${r.g} · ${when}</small>`);
-      marker.addTo(alertLayer);
+      marker.addTo(viberLayer);
       alertMarkers[r.id] = { marker, data: r };
     }
+
+    // Διακόπτης: εμφάνιση/απόκρυψη των σημαδιών Viber στον χάρτη.
+    function applyViberOnMap() {
+      if ($("viberOnMap").checked) viberLayer.addTo(map);
+      else map.removeLayer(viberLayer);
+    }
+    $("viberOnMap").addEventListener("change", applyViberOnMap);
 
     // ------------------------------------------------------------------
     // WAZE LIVE ALERTS — η κύρια πηγή: ζωντανές αναφορές οδηγών (τροχαία,
@@ -1919,6 +1939,7 @@
       $("alertsPanel").style.display = alertsVisible ? "block" : "none";
       if (alertsVisible) {
         alertLayer.addTo(map);
+        applyViberOnMap();               // + Viber σημάδια αν είναι ενεργά
         refreshAlerts();
       }
     });

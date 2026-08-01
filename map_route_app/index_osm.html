@@ -2073,57 +2073,85 @@
     });
 
     // ====================================================================
-    // ΧΩΡΟΙ ΣΤΑΘΜΕΥΣΗΣ (🅿️) — προαιρετικό, με διακόπτη on/off.
-    // Πηγή: TomTom Category Search (ίδιο κλειδί). Δείχνει ΠΟΥ υπάρχουν
-    // πάρκινγκ, όχι πόσες θέσεις είναι ελεύθερες — τα δεδομένα ζωντανής
-    // διαθεσιμότητας δεν διατίθενται στο δωρεάν πλάνο.
+    // ΘΕΣΕΙΣ ΣΤΑΘΜΕΥΣΗΣ (🅿️) — προαιρετικό, με διακόπτη on/off.
+    // Πηγή: OpenStreetMap (Overpass) — ΠΡΑΓΜΑΤΙΚΕΣ θέσεις στάθμευσης:
+    // στον δρόμο (street_side/lane), δωρεάν δημόσιοι χώροι, πλατείες κ.λπ.
+    // ΟΧΙ επιχειρήσεις-γκαράζ (γι' αυτό δεν χρησιμοποιούμε POI αναζήτηση).
+    // Ιδιωτικά (access=private/no) φιλτράρονται. Δείχνει ΠΟΥ επιτρέπεται
+    // στάθμευση — όχι πόσες θέσεις είναι ελεύθερες αυτή τη στιγμή.
     // ====================================================================
+    const OVERPASS = "https://overpass-api.de/api/interpreter";
     const parkingLayer = L.layerGroup();
     const parkingMarkers = {};
     let parkingOn = false, parkingMoveTimer = null;
 
     async function refreshParking() {
       if (!parkingOn) return;
-      if (!trafficReady) {
-        resultEl.innerHTML = '<span class="error">Χρειάζεται κλειδί TomTom για στάθμευση.</span>';
-        return;
-      }
-      if (map.getZoom() < 13) {          // πολύ μακριά → θα γέμιζε ο χάρτης
+      if (map.getZoom() < 14) {          // πολύ μακριά → τεράστιο ερώτημα/χάρτης
         clearParking();
         // Μήνυμα μόνο αν δεν υπάρχει διαδρομή στην οθόνη — αλλιώς θα έσβηνε
         // τα χιλιόμετρα/χρόνο της διαδρομής σε κάθε μετακίνηση του χάρτη.
-        if (!routeLines.length) resultEl.textContent = "Κάνε ζουμ πιο κοντά για χώρους στάθμευσης.";
+        if (!routeLines.length) resultEl.textContent = "Κάνε ζουμ πιο κοντά για θέσεις στάθμευσης.";
         return;
       }
-      const c = map.getCenter(), b = map.getBounds();
-      const radius = Math.min(5000, Math.max(500, Math.round(
-        havDist([b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]) / 2)));
+      const b = map.getBounds();
+      const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()]
+        .map(v => v.toFixed(5)).join(",");
+      const q = `[out:json][timeout:20];nwr["amenity"~"^(parking|parking_space)$"](${bbox});out center 80;`;
       try {
-        const url = "https://api.tomtom.com/search/2/categorySearch/parking.json" +
-          `?key=${TRAFFIC_KEY}&lat=${c.lat}&lon=${c.lng}&radius=${radius}` +
-          "&limit=50&language=el-GR";
-        const data = await (await fetch(url)).json();
-        renderParking(data.results || []);
+        const resp = await fetch(OVERPASS, { method: "POST", body: "data=" + encodeURIComponent(q),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+        if (!resp.ok) return;            // υπερφόρτωση Overpass — ξαναδοκιμάζει
+        const data = await resp.json();
+        renderParking(data.elements || []);
       } catch (e) { /* χωρίς δίκτυο — κρατά ό,τι ήδη δείχνει */ }
     }
 
-    function renderParking(results) {
+    // Κατηγοριοποίηση θέσης από τα tags του OpenStreetMap.
+    function parkKind(tags) {
+      const p = tags.parking || "";
+      if (/street_side|lane|on_street/.test(p))
+        return { ico: "🅿️", label: "Θέση στον δρόμο" };
+      if (tags.amenity === "parking_space")
+        return { ico: "🅿️", label: "Θέση στάθμευσης" };
+      if (tags.fee === "yes") return { ico: "💰", label: "Στάθμευση επί πληρωμή" };
+      if (tags.fee === "no") return { ico: "🅿️", label: "Δωρεάν στάθμευση" };
+      return { ico: "🅿️", label: "Χώρος στάθμευσης" };
+    }
+
+    function renderParking(elements) {
       const live = {};
-      results.forEach(r => {
-        if (!r.position) return;
-        const id = r.id || (r.position.lat.toFixed(5) + "," + r.position.lon.toFixed(5));
+      elements.forEach(el => {
+        const tags = el.tags || {};
+        // Πέτα ιδιωτικά/απαγορευμένα — δεν μπορείς να παρκάρεις εκεί.
+        if (/^(private|no|permit)$/.test(tags.access || "")) return;
+        const lat = el.lat != null ? el.lat : (el.center && el.center.lat);
+        const lon = el.lon != null ? el.lon : (el.center && el.center.lon);
+        if (lat == null || lon == null) return;
+        const id = el.type + el.id;
         live[id] = true;
         if (parkingMarkers[id]) return;
-        const name = (r.poi && r.poi.name) || "Χώρος στάθμευσης";
-        const addr = (r.address && r.address.freeformAddress) || "";
-        const m = L.marker([r.position.lat, r.position.lon], {
-          icon: L.divIcon({ className: "", html: '<div class="parking-pin">🅿️</div>',
+
+        const kind = parkKind(tags);
+        const bits = [];
+        if (tags.name) bits.push(tags.name);
+        if (tags.capacity) bits.push(tags.capacity + " θέσεις");
+        // Το κόστος μπαίνει μόνο αν δεν το λέει ήδη ο τίτλος (χωρίς επανάληψη).
+        const feeInTitle = /πληρωμή|Δωρεάν/.test(kind.label);
+        if (!feeInTitle && tags.fee === "yes") bits.push("με πληρωμή");
+        else if (!feeInTitle && tags.fee === "no") bits.push("δωρεάν");
+        if (tags.maxstay) bits.push("έως " + tags.maxstay);
+        if (tags.access === "customers") bits.push("για πελάτες");
+
+        const m = L.marker([lat, lon], {
+          icon: L.divIcon({ className: "", html: `<div class="parking-pin">${kind.ico}</div>`,
             iconSize: [24, 24], iconAnchor: [12, 12] }),
           zIndexOffset: 900,
         });
         // Το κουμπί ξαναχρησιμοποιεί το υπάρχον setPointHere (ορισμός προορισμού).
-        m.bindPopup(`<b>🅿️ ${name}</b><br><small>${addr}</small>` +
-          `<button onclick="setPointHere('B',${r.position.lat},${r.position.lon})">Πλοήγηση εδώ</button>`);
+        m.bindPopup(`<b>${kind.ico} ${kind.label}</b>` +
+          (bits.length ? `<br><small>${bits.join(" · ")}</small>` : "") +
+          `<button onclick="setPointHere('B',${lat},${lon})">Πλοήγηση εδώ</button>`);
         m.addTo(parkingLayer);
         parkingMarkers[id] = m;
       });

@@ -178,6 +178,11 @@
       filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
     }
     #alertsBtn.on { background: #c5221f !important; }
+    #parkingBtn.on { background: #1a73e8 !important; }
+    .parking-pin {
+      font-size: 20px; text-align: center; line-height: 1;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
+    }
 
     .sat-btn {
       width: 40px; height: 40px; border: none; border-radius: 8px;
@@ -253,6 +258,7 @@
         <button id="swap" title="Αντιστροφή">⇅</button>
         <button id="locate" title="Η θέση μου">📍</button>
         <button id="alertsBtn" title="Ειδοποιήσεις ομάδων">🚨</button>
+        <button id="parkingBtn" title="Χώροι στάθμευσης">🅿️</button>
         <button id="clear" title="Καθαρισμός">✕</button>
       </div>
       <div id="result"></div>
@@ -2066,11 +2072,87 @@
       refreshAlerts();
     });
 
+    // ====================================================================
+    // ΧΩΡΟΙ ΣΤΑΘΜΕΥΣΗΣ (🅿️) — προαιρετικό, με διακόπτη on/off.
+    // Πηγή: TomTom Category Search (ίδιο κλειδί). Δείχνει ΠΟΥ υπάρχουν
+    // πάρκινγκ, όχι πόσες θέσεις είναι ελεύθερες — τα δεδομένα ζωντανής
+    // διαθεσιμότητας δεν διατίθενται στο δωρεάν πλάνο.
+    // ====================================================================
+    const parkingLayer = L.layerGroup();
+    const parkingMarkers = {};
+    let parkingOn = false, parkingMoveTimer = null;
+
+    async function refreshParking() {
+      if (!parkingOn) return;
+      if (!trafficReady) {
+        resultEl.innerHTML = '<span class="error">Χρειάζεται κλειδί TomTom για στάθμευση.</span>';
+        return;
+      }
+      if (map.getZoom() < 13) {          // πολύ μακριά → θα γέμιζε ο χάρτης
+        clearParking();
+        // Μήνυμα μόνο αν δεν υπάρχει διαδρομή στην οθόνη — αλλιώς θα έσβηνε
+        // τα χιλιόμετρα/χρόνο της διαδρομής σε κάθε μετακίνηση του χάρτη.
+        if (!routeLines.length) resultEl.textContent = "Κάνε ζουμ πιο κοντά για χώρους στάθμευσης.";
+        return;
+      }
+      const c = map.getCenter(), b = map.getBounds();
+      const radius = Math.min(5000, Math.max(500, Math.round(
+        havDist([b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]) / 2)));
+      try {
+        const url = "https://api.tomtom.com/search/2/categorySearch/parking.json" +
+          `?key=${TRAFFIC_KEY}&lat=${c.lat}&lon=${c.lng}&radius=${radius}` +
+          "&limit=50&language=el-GR";
+        const data = await (await fetch(url)).json();
+        renderParking(data.results || []);
+      } catch (e) { /* χωρίς δίκτυο — κρατά ό,τι ήδη δείχνει */ }
+    }
+
+    function renderParking(results) {
+      const live = {};
+      results.forEach(r => {
+        if (!r.position) return;
+        const id = r.id || (r.position.lat.toFixed(5) + "," + r.position.lon.toFixed(5));
+        live[id] = true;
+        if (parkingMarkers[id]) return;
+        const name = (r.poi && r.poi.name) || "Χώρος στάθμευσης";
+        const addr = (r.address && r.address.freeformAddress) || "";
+        const m = L.marker([r.position.lat, r.position.lon], {
+          icon: L.divIcon({ className: "", html: '<div class="parking-pin">🅿️</div>',
+            iconSize: [24, 24], iconAnchor: [12, 12] }),
+          zIndexOffset: 900,
+        });
+        // Το κουμπί ξαναχρησιμοποιεί το υπάρχον setPointHere (ορισμός προορισμού).
+        m.bindPopup(`<b>🅿️ ${name}</b><br><small>${addr}</small>` +
+          `<button onclick="setPointHere('B',${r.position.lat},${r.position.lon})">Πλοήγηση εδώ</button>`);
+        m.addTo(parkingLayer);
+        parkingMarkers[id] = m;
+      });
+      for (const id in parkingMarkers) {         // πέτα όσα βγήκαν εκτός περιοχής
+        if (!live[id]) { parkingMarkers[id].remove(); delete parkingMarkers[id]; }
+      }
+    }
+
+    function clearParking() {
+      Object.values(parkingMarkers).forEach(m => m.remove());
+      for (const k in parkingMarkers) delete parkingMarkers[k];
+    }
+
+    $("parkingBtn").addEventListener("click", () => {
+      parkingOn = !parkingOn;
+      $("parkingBtn").classList.toggle("on", parkingOn);
+      if (parkingOn) { parkingLayer.addTo(map); refreshParking(); }
+      else { clearParking(); map.removeLayer(parkingLayer); }
+    });
+
     // Περιοδική ανανέωση: στο panel ή κατά την πλοήγηση.
     setInterval(() => { if (alertsVisible || nav.active) refreshAlerts(); }, 60000);
     // Νέα περιοχή στον χάρτη → φρέσκες αναφορές Waze (με μικρή καθυστέρηση).
     let wazeMoveTimer = null;
     map.on("moveend", () => {
+      if (parkingOn) {                   // νέα περιοχή → νέα πάρκινγκ
+        clearTimeout(parkingMoveTimer);
+        parkingMoveTimer = setTimeout(refreshParking, 1200);
+      }
       if (!alertsVisible && !nav.active) return;
       clearTimeout(wazeMoveTimer);
       wazeMoveTimer = setTimeout(refreshAlerts, 1200);

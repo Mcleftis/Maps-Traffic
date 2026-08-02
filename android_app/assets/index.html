@@ -179,6 +179,8 @@
     }
     #alertsBtn.on { background: #c5221f !important; }
     #parkingBtn.on { background: #1a73e8 !important; }
+    #parkStatus { display: none; font-size: 12px; color: #555; padding: 2px 2px 0; }
+    #parkStatus.err { color: #c5221f; }
     .parking-pin {
       font-size: 20px; text-align: center; line-height: 1;
       filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
@@ -262,6 +264,7 @@
         <button id="clear" title="Καθαρισμός">✕</button>
       </div>
       <div id="result"></div>
+      <div id="parkStatus"></div>
       <button id="stepsToggle">Οδηγίες βήμα-βήμα ▾</button>
       <div id="steps"></div>
       <div id="alertsPanel">
@@ -2080,31 +2083,58 @@
     // Ιδιωτικά (access=private/no) φιλτράρονται. Δείχνει ΠΟΥ επιτρέπεται
     // στάθμευση — όχι πόσες θέσεις είναι ελεύθερες αυτή τη στιγμή.
     // ====================================================================
-    const OVERPASS = "https://overpass-api.de/api/interpreter";
+    // Οι δωρεάν Overpass servers συχνά είναι φορτωμένοι (429/504) — δοκιμάζουμε
+    // εναλλακτικούς, και ΠΑΝΤΑ δείχνουμε τι έγινε (όχι σιωπηλή αποτυχία).
+    const OVERPASS_MIRRORS = [
+      "https://overpass-api.de/api/interpreter",
+      "https://overpass.kumi.systems/api/interpreter",
+      "https://z.overpass-api.de/api/interpreter",
+    ];
     const parkingLayer = L.layerGroup();
     const parkingMarkers = {};
     let parkingOn = false, parkingMoveTimer = null;
+
+    // Ξεχωριστή γραμμή κατάστασης: δεν πειράζει τα στοιχεία της διαδρομής.
+    function parkMsg(text, isError) {
+      const el = $("parkStatus");
+      el.style.display = text ? "block" : "none";
+      el.classList.toggle("err", !!isError);
+      el.textContent = text || "";
+    }
 
     async function refreshParking() {
       if (!parkingOn) return;
       if (map.getZoom() < 14) {          // πολύ μακριά → τεράστιο ερώτημα/χάρτης
         clearParking();
-        // Μήνυμα μόνο αν δεν υπάρχει διαδρομή στην οθόνη — αλλιώς θα έσβηνε
-        // τα χιλιόμετρα/χρόνο της διαδρομής σε κάθε μετακίνηση του χάρτη.
-        if (!routeLines.length) resultEl.textContent = "Κάνε ζουμ πιο κοντά για θέσεις στάθμευσης.";
+        parkMsg("Κάνε ζουμ πιο κοντά για θέσεις στάθμευσης.");
         return;
       }
       const b = map.getBounds();
       const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()]
         .map(v => v.toFixed(5)).join(",");
-      const q = `[out:json][timeout:20];nwr["amenity"~"^(parking|parking_space)$"](${bbox});out center 80;`;
-      try {
-        const resp = await fetch(OVERPASS, { method: "POST", body: "data=" + encodeURIComponent(q),
-          headers: { "Content-Type": "application/x-www-form-urlencoded" } });
-        if (!resp.ok) return;            // υπερφόρτωση Overpass — ξαναδοκιμάζει
-        const data = await resp.json();
-        renderParking(data.elements || []);
-      } catch (e) { /* χωρίς δίκτυο — κρατά ό,τι ήδη δείχνει */ }
+      // Ακριβή ταιριάσματα σε ένωση (πιο γρήγορα/αξιόπιστα από regex στο value).
+      const q = "[out:json][timeout:25];(" +
+        `nwr["amenity"="parking"](${bbox});` +
+        `nwr["amenity"="parking_space"](${bbox});` +
+        ");out center 100;";
+      parkMsg("🅿️ Αναζήτηση θέσεων…");
+      let lastErr = "";
+      for (const server of OVERPASS_MIRRORS) {
+        try {
+          const resp = await fetch(server, {
+            method: "POST", body: "data=" + encodeURIComponent(q),
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          });
+          if (!resp.ok) { lastErr = "HTTP " + resp.status; continue; }   // φορτωμένος → επόμενος
+          const data = await resp.json();
+          if (!parkingOn) return;        // ο χρήστης το έκλεισε στο μεταξύ
+          const n = renderParking(data.elements || []);
+          parkMsg(n ? `🅿️ ${n} θέσεις στάθμευσης σε αυτή την περιοχή.`
+                    : "Δεν υπάρχουν καταγεγραμμένες θέσεις εδώ στο OpenStreetMap.");
+          return;
+        } catch (e) { lastErr = (e && e.message) || "δίκτυο"; }
+      }
+      parkMsg("Αποτυχία λήψης θέσεων (" + lastErr + "). Δοκίμασε ξανά σε λίγο.", true);
     }
 
     // Κατηγοριοποίηση θέσης από τα tags του OpenStreetMap.
@@ -2158,6 +2188,7 @@
       for (const id in parkingMarkers) {         // πέτα όσα βγήκαν εκτός περιοχής
         if (!live[id]) { parkingMarkers[id].remove(); delete parkingMarkers[id]; }
       }
+      return Object.keys(parkingMarkers).length;
     }
 
     function clearParking() {
@@ -2169,7 +2200,7 @@
       parkingOn = !parkingOn;
       $("parkingBtn").classList.toggle("on", parkingOn);
       if (parkingOn) { parkingLayer.addTo(map); refreshParking(); }
-      else { clearParking(); map.removeLayer(parkingLayer); }
+      else { clearParking(); map.removeLayer(parkingLayer); parkMsg(""); }
     });
 
     // Περιοδική ανανέωση: στο panel ή κατά την πλοήγηση.

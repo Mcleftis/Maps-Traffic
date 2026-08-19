@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "01JCXG7K2N8P4QVR9WYZ3MDFTA",
+  "eventType": "traffic.alert.created",
+  "occurredAt": "2026-08-19T12:30:00.000Z",
+  "ingestedAt": "2026-08-19T12:30:01.412Z",
+  "alert": {
+    "type": "ACCIDENT",
+    "severity": "MAJOR",
+    "confidence": 1.0,
+    "text": "Τροχαίο στην Εγνατία, κλειστή η δεξιά λωρίδα",
+    "language": "el"
+  },
+  "location": {
+    "lat": 40.6401,
+    "lon": 22.9444,
+    "geohash5": "sx0r4",
+    "geohash7": "sx0r4n7",
+    "accuracyM": 25,
+    "adminArea": "Θεσσαλονίκη"
+  },
+  "provenance": {
+    "source": "VIBER_GROUP",
+    "sourceRef": "Κίνηση Θεσσαλονίκη",
+    "inputType": "TEXT",
+    "producer": "android_app/33.0",
+    "deviceHash": "b9c1e4f7a2d8",
+    "enrichedBy": []
+  },
+  "ttl": { "expiresAt": 1787164200 }
+}

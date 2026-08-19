@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+# =====================================================================
+# Maps-Traffic — Φάση 0+1: ingest, routing, live store, archive
+#
+# ΕΚΠΑΙΔΕΥΤΙΚΟ. Δεν έχει γίνει deploy. Πριν από κάθε deploy:
+#   1. Στήσε budget alarm  (docs/aws/lab/00-account-setup.md)
+#   2. Διάβασε το docs/aws/07-cost.md
+#
+#   sam deploy --guided --stack-name maps-traffic-ingest \
+#              --capabilities CAPABILITY_IAM --region eu-central-1
+#
+# Teardown:  sam delete --stack-name maps-traffic-ingest
+# =====================================================================
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  RetentionDays:
+    Type: Number
+    Default: 30
+    Description: Ημέρες πριν τα raw δεδομένα πάνε σε φθηνότερη κλάση
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]        # Graviton: ~20% φθηνότερα από x86
+    Timeout: 10
+    MemorySize: 512
+    Tracing: Active               # X-Ray
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: maps-traffic
+        LOG_LEVEL: INFO
+
+Resources:
+
+  # -------------------------------------------------------------------
+  # STORAGE
+  # -------------------------------------------------------------------
+  RawBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain        # τα raw δεδομένα δεν σβήνονται με το stack
+    Properties:
+      BucketName: !Sub 'maps-traffic-raw-${Environment}-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TierOldData
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: !Ref RetentionDays
+          - Id: CleanIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  CuratedBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub 'maps-traffic-curated-${Environment}-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+
+  # -------------------------------------------------------------------
+  # LIVE STORE
+  # PK = geohash5 (κελί ~5km), SK = occurredAt#eventId
+  # Το TTL σβήνει μόνο του μετά τις 6 ώρες — αντικαθιστά το MAX_AGE_MS
+  # του σημερινού relay/worker.js, χωρίς κόστος.
+  # -------------------------------------------------------------------
+  AlertsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'maps-traffic-alerts-${Environment}'
+      BillingMode: PAY_PER_REQUEST      # χωρίς capacity planning
+      AttributeDefinitions:
+        - {AttributeName: geohash5,  AttributeType: S}
+        - {AttributeName: sortKey,   AttributeType: S}
+      KeySchema:
+        - {AttributeName: geohash5,  KeyType: HASH}
+        - {AttributeName: sortKey,   KeyType: RANGE}
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # -------------------------------------------------------------------
+  # EVENT BUS
+  # -------------------------------------------------------------------
+  TrafficBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub 'maps-traffic-${Environment}'
+
+  # Archive: επιτρέπει replay events μιας ημερομηνίας σε νέο consumer.
+  # Από τα πιο υποτιμημένα χαρακτηριστικά του EventBridge.
+  BusArchive:
+    Type: AWS::Events::Archive
+    Properties:
+      ArchiveName: !Sub 'maps-traffic-archive-${Environment}'
+      SourceArn: !GetAtt TrafficBus.Arn
+      RetentionDays: 90
+
+  # -------------------------------------------------------------------
+  # INGEST — το συγχρονο όριο. Επικυρώνει, κανονικοποιεί, δημοσιεύει.
+  # Ό,τι είναι αργό γίνεται async μετά το EventBridge.
+  # -------------------------------------------------------------------
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'maps-traffic-ingest-${Environment}'
+      Handler: ingest.handler
+      CodeUri: ../src/ingest/
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref TrafficBus
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref TrafficBus
+      Events:
+        PostAlert:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /alerts
+            Method: POST
+
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'maps-traffic-query-${Environment}'
+      Handler: query.handler
+      CodeUri: ../src/query/
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AlertsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AlertsTable
+      Events:
+        GetAlerts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /alerts
+            Method: GET
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      # Throttling ανά συνδρομητή — αυτό λείπει τελείως από το σημερινό relay
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowHeaders: [Content-Type, Authorization]
+        AllowMethods: [GET, POST, OPTIONS]
+
+  # -------------------------------------------------------------------
+  # ARCHIVE PATH — EventBridge -> Firehose -> S3
+  # Το Firehose μαζεύει events σε batches: λύνει το small-files problem
+  # που θα δημιουργούσε ένα PutObject ανά alert.
+  # -------------------------------------------------------------------
+  ArchiveRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref TrafficBus
+      Description: Κάθε έγκυρο alert πάει στο data lake
+      EventPattern:
+        source: [maps-traffic.ingest]
+        detail-type: [traffic.alert.created]
+      Targets:
+        - Id: FirehoseTarget
+          Arn: !GetAtt AlertsFirehose.Arn
+          RoleArn: !GetAtt EventsToFirehoseRole.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt ArchiveDlq.Arn      # ποτέ async target χωρίς DLQ
+
+  ArchiveDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'maps-traffic-archive-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600        # 14 ημέρες, το μέγιστο
+      SqsManagedSseEnabled: true
+
+  AlertsFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub 'maps-traffic-alerts-${Environment}'
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt RawBucket.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+        # Το partitioning πρέπει να ταιριάζει με το projection στο
+        # sql/01-create-tables.sql, αλλιώς το Athena δεν βρίσκει τίποτα.
+        Prefix: 'alerts/dt=!{timestamp:yyyy-MM-dd}/hh=!{timestamp:HH}/'
+        ErrorOutputPrefix: 'errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/'
+        BufferingHints:
+          IntervalInSeconds: 900             # 15′ — με λίγα events, ο χρόνος
+          SizeInMBs: 128                     # γεμίζει πρώτος, όχι το μέγεθος
+        CompressionFormat: GZIP
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Sub '/aws/kinesisfirehose/maps-traffic-${Environment}'
+          LogStreamName: S3Delivery
+
+  # -------------------------------------------------------------------
+  # IAM — least privilege. Κάθε role βλέπει μόνο ό,τι χρειάζεται.
+  # -------------------------------------------------------------------
+  EventsToFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: events.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PutToFirehose
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [firehose:PutRecord, firehose:PutRecordBatch]
+                Resource: !GetAtt AlertsFirehose.Arn
+
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: firehose.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteToRawBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt RawBucket.Arn
+                  - !Sub '${RawBucket.Arn}/*'
+              - Effect: Allow
+                Action: [logs:PutLogEvents]
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: Το URL που αντικαθιστά το Cloudflare Worker
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+  RawBucketName:
+    Value: !Ref RawBucket
+  EventBusName:
+    Value: !Ref TrafficBus

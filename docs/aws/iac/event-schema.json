@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maps-traffic/schemas/traffic-alert/1.0",
+  "title": "Traffic Alert Event",
+  "description": "Το canonical event του Maps-Traffic. Χρησιμοποιείται για API Gateway request validation και για το EventBridge Schema Registry.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "eventType",
+    "occurredAt",
+    "alert",
+    "location",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$",
+      "description": "Minor bump = προσθήκη προαιρετικού πεδίου. Major bump = breaking change."
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID — lexicographically sortable κατά χρόνο, σε αντίθεση με UUIDv4."
+    },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "traffic.alert.created",
+        "traffic.alert.updated",
+        "traffic.alert.cleared"
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event time — πότε συνέβη στην πραγματικότητα."
+    },
+    "ingestedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Processing time — πότε το παραλάβαμε. Η διαφορά από το occurredAt είναι μετρήσιμη καθυστέρηση."
+    },
+    "alert": {
+      "type": "object",
+      "required": [
+        "type",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "ACCIDENT",
+            "CONGESTION",
+            "ROAD_CLOSED",
+            "POLICE",
+            "HAZARD",
+            "ROADWORKS",
+            "WEATHER",
+            "VEHICLE_STOPPED",
+            "OTHER"
+          ],
+          "description": "Κλειστό enum. Ό,τι δεν ταιριάζει -> OTHER, με το κείμενο να διατηρείται."
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "MINOR",
+            "MODERATE",
+            "MAJOR",
+            "CRITICAL"
+          ],
+          "default": "MODERATE"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "1.0 για ανθρώπινη αναφορά, score μοντέλου για AI."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "language": {
+          "type": "string",
+          "pattern": "^[a-z]{2}$",
+          "default": "el"
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "required": [
+        "lat",
+        "lon",
+        "geohash5"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "lat": {
+          "type": "number",
+          "minimum": 34.5,
+          "maximum": 42.0,
+          "description": "Περιορισμένο στην Ελλάδα — απορρίπτει προφανή σφάλματα GPS."
+        },
+        "lon": {
+          "type": "number",
+          "minimum": 19.0,
+          "maximum": 30.0
+        },
+        "geohash5": {
+          "type": "string",
+          "pattern": "^[0-9b-hjkmnp-z]{5}$",
+          "description": "Κελί ~4.9km. Partition key στο DynamoDB."
+        },
+        "geohash7": {
+          "type": "string",
+          "pattern": "^[0-9b-hjkmnp-z]{7}$",
+          "description": "Κελί ~153m. Χρησιμοποιείται για deduplication."
+        },
+        "accuracyM": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "adminArea": {
+          "type": "string",
+          "maxLength": 80
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "source",
+        "inputType"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "VIBER_GROUP",
+            "USER_REPORT",
+            "WAZE",
+            "TOMTOM",
+            "SYSTEM"
+          ]
+        },
+        "sourceRef": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "sourceId": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Το αρχικό αναγνωριστικό στην πηγή (π.χ. το `id` του relay). Χρήσιμο για ιχνηλάτηση προς τα πίσω."
+        },
+        "inputType": {
+          "type": "string",
+          "enum": [
+            "TEXT",
+            "VOICE",
+            "IMAGE"
+          ],
+          "description": "Καθορίζει το branch στο Step Functions."
+        },
+        "producer": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "deviceHash": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "SALTED hash με salt που εναλλάσσεται μηνιαία. Θέση + σταθερό id = παρακολούθηση."
+        },
+        "enrichedBy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "description": "Μόνο για inputType VOICE/IMAGE.",
+      "additionalProperties": false,
+      "properties": {
+        "s3Uri": {
+          "type": "string",
+          "pattern": "^s3://"
+        },
+        "key": {
+          "type": "string"
+        },
+        "contentType": {
+          "type": "string"
+        }
+      }
+    },
+    "ttl": {
+      "type": "object",
+      "properties": {
+        "expiresAt": {
+          "type": "integer",
+          "description": "Unix SECONDS — το απαιτεί το DynamoDB TTL. Μοναδική εξαίρεση στον κανόνα ISO 8601."
+        }
+      }
+    }
+  }
+}

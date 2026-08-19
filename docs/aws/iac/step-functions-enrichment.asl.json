@@ -1,0 +1,335 @@
+{
+  "Comment": "Maps-Traffic enrichment — branching ανά τύπο εισόδου (κείμενο/φωνή/εικόνα), dedup, αποθήκευση. Εκπαιδευτικό, δεν έχει γίνει deploy.",
+  "StartAt": "ValidateEvent",
+  "TimeoutSeconds": 900,
+  "States": {
+    "ValidateEvent": {
+      "Comment": "Έλεγχος υποχρεωτικών πεδίων. Ό,τι δεν περνά, πάει σε quarantine αντί να πεταχτεί σιωπηλά.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ValidateFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "event.$": "$.Payload"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Quarantine",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "RouteByInputType"
+    },
+    "RouteByInputType": {
+      "Comment": "Το branching που δικαιολογεί το Step Functions αντί για μία Lambda.",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.event.provenance.inputType",
+          "StringEquals": "VOICE",
+          "Next": "TranscribeAudio"
+        },
+        {
+          "Variable": "$.event.provenance.inputType",
+          "StringEquals": "IMAGE",
+          "Next": "DetectLabels"
+        },
+        {
+          "Variable": "$.event.provenance.inputType",
+          "StringEquals": "TEXT",
+          "Next": "ClassifyText"
+        }
+      ],
+      "Default": "Deduplicate"
+    },
+    "TranscribeAudio": {
+      "Comment": "Async job. Το startTranscriptionJob ΔΕΝ υποστηρίζει .sync, άρα χρειάζεται polling loop (Wait -> Get -> Choice). Γι' αυτό Standard workflow, όχι Express: το όριο των 5' δεν φτάνει.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob",
+      "Parameters": {
+        "TranscriptionJobName.$": "States.Format('tr-{}', $.event.eventId)",
+        "LanguageCode": "el-GR",
+        "Media": {
+          "MediaFileUri.$": "$.event.media.s3Uri"
+        },
+        "OutputBucketName": "${TranscriptsBucket}"
+      },
+      "ResultPath": "$.transcription",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Transcribe.LimitExceededException",
+            "Transcribe.InternalFailureException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Αν αποτύχει η μεταγραφή, το alert ΔΕΝ χάνεται — αποθηκεύεται χωρίς κατηγοριοποίηση.",
+          "Next": "Deduplicate",
+          "ResultPath": "$.transcribeError"
+        }
+      ],
+      "Next": "WaitForTranscription"
+    },
+    "WaitForTranscription": {
+      "Comment": "Backoff μεταξύ των ελέγχων. 20\" x 15 προσπάθειες = 5' μέγιστη αναμονή.",
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "GetTranscriptionJob"
+    },
+    "GetTranscriptionJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob",
+      "Parameters": {
+        "TranscriptionJobName.$": "$.transcription.TranscriptionJob.TranscriptionJobName"
+      },
+      "ResultPath": "$.transcription",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Transcribe.LimitExceededException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Αν δεν μπορούμε καν να ρωτήσουμε, το alert συνεχίζει χωρίς μεταγραφή.",
+          "Next": "Deduplicate",
+          "ResultPath": "$.transcribeError"
+        }
+      ],
+      "Next": "IsTranscriptionDone"
+    },
+    "IsTranscriptionDone": {
+      "Comment": "COMPLETED -> κατηγοριοποίηση. FAILED -> το alert σώζεται χωρίς κείμενο. Αλλιώς ξαναπερίμενε.",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.transcription.TranscriptionJob.TranscriptionJobStatus",
+          "StringEquals": "COMPLETED",
+          "Next": "ClassifyText"
+        },
+        {
+          "Variable": "$.transcription.TranscriptionJob.TranscriptionJobStatus",
+          "StringEquals": "FAILED",
+          "Next": "Deduplicate"
+        }
+      ],
+      "Default": "WaitForTranscription"
+    },
+    "ClassifyText": {
+      "Comment": "ΠΡΟΣΟΧΗ: πριν μπει σε παραγωγή, συγκρίνεται με το baseline κανόνων του 02-event-schema.md. Αν οι κανόνες κερδίζουν, το βήμα αφαιρείται.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ClassifyFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "event.$": "$.Payload.event"
+      },
+      "ResultPath": "$.classified",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Deduplicate",
+          "ResultPath": "$.classifyError"
+        }
+      ],
+      "Next": "Deduplicate"
+    },
+    "DetectLabels": {
+      "Comment": "Μόνο labels. ΠΟΤΕ face/celebrity APIs — βιομετρικά δεδομένα υπό GDPR.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:detectLabels",
+      "Parameters": {
+        "Image": {
+          "S3Object": {
+            "Bucket": "${MediaBucket}",
+            "Name.$": "$.event.media.key"
+          }
+        },
+        "MaxLabels": 10,
+        "MinConfidence": 70
+      },
+      "ResultPath": "$.labels",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Deduplicate",
+          "ResultPath": "$.rekognitionError"
+        }
+      ],
+      "Next": "Deduplicate"
+    },
+    "Deduplicate": {
+      "Comment": "Ίδιος τύπος + ίδιο geohash7 (~150m) + εντός 10 λεπτών = ίδιο συμβάν.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DedupFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "isDuplicate.$": "$.Payload.isDuplicate",
+        "event.$": "$.Payload.event"
+      },
+      "Next": "IsDuplicate"
+    },
+    "IsDuplicate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.isDuplicate",
+          "BooleanEquals": true,
+          "Next": "DropDuplicate"
+        }
+      ],
+      "Default": "PersistAndPublish"
+    },
+    "DropDuplicate": {
+      "Type": "Succeed",
+      "Comment": "Δεν είναι σφάλμα. Το μετράμε ως μετρική, δεν το αποθηκεύουμε."
+    },
+    "PersistAndPublish": {
+      "Comment": "Parallel: το live store και το data lake είναι ανεξάρτητα. Αν πέσει το ένα, το άλλο δεν πρέπει να μπλοκάρει.",
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "WriteToDynamoDB",
+          "States": {
+            "WriteToDynamoDB": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "${AlertsTable}",
+                "Item": {
+                  "geohash5": {
+                    "S.$": "$.event.location.geohash5"
+                  },
+                  "sortKey": {
+                    "S.$": "States.Format('{}#{}', $.event.occurredAt, $.event.eventId)"
+                  },
+                  "alertType": {
+                    "S.$": "$.event.alert.type"
+                  },
+                  "text": {
+                    "S.$": "$.event.alert.text"
+                  },
+                  "lat": {
+                    "N.$": "States.JsonToString($.event.location.lat)"
+                  },
+                  "lon": {
+                    "N.$": "States.JsonToString($.event.location.lon)"
+                  },
+                  "confidence": {
+                    "N.$": "States.JsonToString($.event.alert.confidence)"
+                  },
+                  "expiresAt": {
+                    "N.$": "States.JsonToString($.event.ttl.expiresAt)"
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "DynamoDB.ProvisionedThroughputExceededException",
+                    "DynamoDB.ThrottlingException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 5,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "SendToFirehose",
+          "States": {
+            "SendToFirehose": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:firehose:putRecord",
+              "Parameters": {
+                "DeliveryStreamName": "${FirehoseName}",
+                "Record": {
+                  "Data.$": "States.Base64Encode(States.JsonToString($.event))"
+                }
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Quarantine",
+          "ResultPath": "$.error"
+        }
+      ],
+      "End": true
+    },
+    "Quarantine": {
+      "Comment": "Τίποτα δεν εξαφανίζεται σιωπηλά. Ό,τι απέτυχε πάει σε ουρά για ανθρώπινη εξέταση.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage",
+      "Parameters": {
+        "QueueUrl": "${QuarantineQueueUrl}",
+        "MessageBody.$": "States.JsonToString($)"
+      },
+      "Next": "FailExecution"
+    },
+    "FailExecution": {
+      "Type": "Fail",
+      "Error": "EnrichmentFailed",
+      "Cause": "Το event απέτυχε στο enrichment και μπήκε σε quarantine."
+    }
+  }
+}

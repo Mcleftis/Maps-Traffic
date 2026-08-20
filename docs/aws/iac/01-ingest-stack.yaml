@@ -195,6 +195,44 @@ Resources:
             Path: /alerts
             Method: GET
 
+  # -------------------------------------------------------------------
+  # LIVE STORE WRITER — EventBridge -> DynamoDB
+  # Ο κρίκος ανάμεσα στο ingest και στο query: χωρίς αυτόν το GET /alerts
+  # απαντά πάντα άδειο.
+  # -------------------------------------------------------------------
+  StoreFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'maps-traffic-store-${Environment}'
+      Handler: store.handler
+      CodeUri: ../src/store/
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AlertsTable
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref AlertsTable
+      Events:
+        AlertCreated:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref TrafficBus
+            Pattern:
+              source: [maps-traffic.ingest]
+              detail-type: [traffic.alert.created]
+            DeadLetterConfig:
+              Type: SQS
+              Destination: !GetAtt StoreDlq.Arn
+
+  # Ποτέ async target χωρίς DLQ: αλλιώς ένα event που αποτυγχάνει σταθερά
+  # εξαφανίζεται μετά τις retries και δεν το μαθαίνει κανείς.
+  StoreDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'maps-traffic-store-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:

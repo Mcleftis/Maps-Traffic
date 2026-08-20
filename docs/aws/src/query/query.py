@@ -7,10 +7,8 @@
 
 import json
 import os
-import sys
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ingest"))
-import geohash                                     # noqa: E402
+import geohash
 
 TABLE_NAME = os.environ.get("TABLE_NAME", "maps-traffic-alerts-dev")
 MAX_ITEMS = 200

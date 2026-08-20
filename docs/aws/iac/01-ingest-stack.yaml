@@ -23,6 +23,17 @@ Parameters:
     Type: Number
     Default: 30
     Description: Ημέρες πριν τα raw δεδομένα πάνε σε φθηνότερη κλάση
+  EnableArchivePath:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Ενεργοποιεί το archive path (EventBridge -> Firehose -> S3).
+      Απαιτεί ενεργοποιημένο Kinesis Data Firehose στον λογαριασμό·
+      αλλιώς το deploy αποτυγχάνει με SubscriptionRequiredException.
+
+Conditions:
+  ArchivePathEnabled: !Equals [!Ref EnableArchivePath, 'true']
 
 Globals:
   Function:
@@ -132,12 +143,23 @@ Resources:
   # INGEST — το συγχρονο όριο. Επικυρώνει, κανονικοποιεί, δημοσιεύει.
   # Ό,τι είναι αργό γίνεται async μετά το EventBridge.
   # -------------------------------------------------------------------
+  # Κοινός κώδικας (geohash) — ένα αντίγραφο, δύο functions.
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub 'maps-traffic-common-${Environment}'
+      ContentUri: ../src/common/
+      CompatibleRuntimes: [python3.12]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Delete
+
   IngestFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub 'maps-traffic-ingest-${Environment}'
       Handler: ingest.handler
       CodeUri: ../src/ingest/
+      Layers: [!Ref CommonLayer]
       Environment:
         Variables:
           EVENT_BUS_NAME: !Ref TrafficBus
@@ -158,6 +180,7 @@ Resources:
       FunctionName: !Sub 'maps-traffic-query-${Environment}'
       Handler: query.handler
       CodeUri: ../src/query/
+      Layers: [!Ref CommonLayer]
       Environment:
         Variables:
           TABLE_NAME: !Ref AlertsTable
@@ -192,6 +215,7 @@ Resources:
   # -------------------------------------------------------------------
   ArchiveRule:
     Type: AWS::Events::Rule
+    Condition: ArchivePathEnabled
     Properties:
       EventBusName: !Ref TrafficBus
       Description: Κάθε έγκυρο alert πάει στο data lake
@@ -207,6 +231,7 @@ Resources:
 
   ArchiveDlq:
     Type: AWS::SQS::Queue
+    Condition: ArchivePathEnabled
     Properties:
       QueueName: !Sub 'maps-traffic-archive-dlq-${Environment}'
       MessageRetentionPeriod: 1209600        # 14 ημέρες, το μέγιστο
@@ -214,6 +239,7 @@ Resources:
 
   AlertsFirehose:
     Type: AWS::KinesisFirehose::DeliveryStream
+    Condition: ArchivePathEnabled
     Properties:
       DeliveryStreamName: !Sub 'maps-traffic-alerts-${Environment}'
       DeliveryStreamType: DirectPut
@@ -238,6 +264,7 @@ Resources:
   # -------------------------------------------------------------------
   EventsToFirehoseRole:
     Type: AWS::IAM::Role
+    Condition: ArchivePathEnabled
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -256,6 +283,7 @@ Resources:
 
   FirehoseRole:
     Type: AWS::IAM::Role
+    Condition: ArchivePathEnabled
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'

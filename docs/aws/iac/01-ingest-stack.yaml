@@ -44,6 +44,7 @@ Resources:
   RawBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain        # τα raw δεδομένα δεν σβήνονται με το stack
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub 'maps-traffic-raw-${Environment}-${AWS::AccountId}'
       PublicAccessBlockConfiguration:
@@ -72,6 +73,7 @@ Resources:
   CuratedBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub 'maps-traffic-curated-${Environment}-${AWS::AccountId}'
       PublicAccessBlockConfiguration:

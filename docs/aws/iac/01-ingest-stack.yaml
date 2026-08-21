@@ -23,6 +23,21 @@ Parameters:
     Type: Number
     Default: 30
     Description: Ημέρες πριν τα raw δεδομένα πάνε σε φθηνότερη κλάση
+  # Χωρίς Default επίτηδες: ένα λάθος issuer/audience δεν αποτυγχάνει στο
+  # deploy, απαντά 401 σε κάθε αίτημα για πάντα. Καλύτερα να σταματήσει το
+  # CloudFormation παρά να ανέβει ένα API που δεν δέχεται κανέναν.
+  OidcIssuer:
+    Type: String
+    AllowedPattern: '^https://.+'
+    Description: >-
+      Ο third-party OIDC provider που εκδίδει τα JWT του Android app.
+      Πρέπει να σερβίρει /.well-known/openid-configuration — από εκεί το
+      API Gateway κατεβάζει μόνο του το JWKS για την επαλήθευση υπογραφής.
+  OidcAudience:
+    Type: String
+    MinLength: 1
+    Description: To aud claim· συνήθως το client id του Android app.
+
   EnableArchivePath:
     Type: String
     Default: 'false'
@@ -237,6 +252,18 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: !Ref Environment
+      # Native JWT authorizer: το API Gateway επαληθεύει υπογραφή, exp, iss
+      # και aud πριν καν ξυπνήσει Lambda. Απορριπτόμενο αίτημα δεν κοστίζει
+      # invocation — ούτε ο κώδικας βλέπει ποτέ ανυπόγραφο token.
+      Auth:
+        Authorizers:
+          OidcAuthorizer:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Ref OidcIssuer
+              audience:
+                - !Ref OidcAudience
+        DefaultAuthorizer: OidcAuthorizer
       # Throttling ανά συνδρομητή — αυτό λείπει τελείως από το σημερινό relay
       DefaultRouteSettings:
         ThrottlingBurstLimit: 100

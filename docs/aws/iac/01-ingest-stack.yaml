@@ -183,11 +183,17 @@ Resources:
             EventBusName: !Ref TrafficBus
       Events:
         PostAlert:
-          Type: HttpApi
+          Type: Api
           Properties:
-            ApiId: !Ref HttpApi
+            RestApiId: !Ref RestApi
             Path: /alerts
             Method: POST
+            # Request validation: κακοσχηματισμένο σώμα κόβεται με 400 στο
+            # API Gateway, χωρίς να ξυπνήσει Lambda.
+            RequestModel:
+              Model: Alert
+              Required: true
+              ValidateBody: true
 
   QueryFunction:
     Type: AWS::Serverless::Function
@@ -204,11 +210,25 @@ Resources:
             TableName: !Ref AlertsTable
       Events:
         GetAlerts:
-          Type: HttpApi
+          Type: Api
           Properties:
-            ApiId: !Ref HttpApi
+            RestApiId: !Ref RestApi
             Path: /alerts
             Method: GET
+            RequestParameters:
+              - method.request.querystring.lat:
+                  Required: true
+              - method.request.querystring.lon:
+                  Required: true
+            # Χωρίς αυτό το RequestModel το `Required: true` παραπάνω είναι
+            # διακοσμητικό: το API Gateway επιβάλλει παραμέτρους μόνο όταν
+            # υπάρχει request validator δεμένος στο method. Το σώμα δεν
+            # ελέγχεται (GET δεν έχει), μόνο οι παράμετροι.
+            RequestModel:
+              Model: Query
+              Required: false
+              ValidateBody: false
+              ValidateParameters: true
 
   # -------------------------------------------------------------------
   # LIVE STORE WRITER — EventBridge -> DynamoDB
@@ -248,30 +268,101 @@ Resources:
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
 
-  HttpApi:
-    Type: AWS::Serverless::HttpApi
+  # -------------------------------------------------------------------
+  # REST API — τρία πράγματα που το HTTP API δεν έχει καθόλου:
+  # API keys, usage plans (quota) και request validation.
+  # Το αντίτιμο: το JWT δεν επαληθεύεται από την υπηρεσία αλλά από τον
+  # AuthorizerFunction, δηλαδή ένα invocation παραπάνω ανά αίτημα.
+  # -------------------------------------------------------------------
+  RestApi:
+    Type: AWS::Serverless::Api
     Properties:
       StageName: !Ref Environment
-      # Native JWT authorizer: το API Gateway επαληθεύει υπογραφή, exp, iss
-      # και aud πριν καν ξυπνήσει Lambda. Απορριπτόμενο αίτημα δεν κοστίζει
-      # invocation — ούτε ο κώδικας βλέπει ποτέ ανυπόγραφο token.
       Auth:
+        # Δύο ανεξάρτητες πύλες: το JWT λέει ΠΟΙΟΣ είσαι, το API key σε ποιο
+        # usage plan ανήκεις. Και τα δύο πρέπει να περάσουν.
+        ApiKeyRequired: true
+        DefaultAuthorizer: OidcAuthorizer
+        # Το preflight OPTIONS το στέλνει ο browser ΠΡΙΝ ξέρει ότι χρειάζεται
+        # credentials: φεύγει χωρίς Authorization και χωρίς x-api-key. Αν του
+        # ζητήσεις είτε το ένα είτε το άλλο, απαντά 401 και ο client δεν
+        # φτάνει ποτέ στο πραγματικό αίτημα. Το SAM τα βάζει και τα δύο by
+        # default — εδώ αφαιρούνται ρητά.
+        AddDefaultAuthorizerToCorsPreflight: false
+        AddApiKeyRequiredToCorsPreflight: false
         Authorizers:
           OidcAuthorizer:
-            IdentitySource: '$request.header.Authorization'
-            JwtConfiguration:
-              issuer: !Ref OidcIssuer
-              audience:
-                - !Ref OidcAudience
-        DefaultAuthorizer: OidcAuthorizer
-      # Throttling ανά συνδρομητή — αυτό λείπει τελείως από το σημερινό relay
-      DefaultRouteSettings:
-        ThrottlingBurstLimit: 100
-        ThrottlingRateLimit: 50
-      CorsConfiguration:
-        AllowOrigins: ['*']
-        AllowHeaders: [Content-Type, Authorization]
-        AllowMethods: [GET, POST, OPTIONS]
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            FunctionPayloadType: REQUEST
+            Identity:
+              Headers: [Authorization]
+              # Cache ανά token: χωρίς αυτό πληρώνεις authorizer invocation
+              # σε κάθε κλήση.
+              ReauthorizeEvery: 300
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          Description: Όριο ανά κλειδί για το Android app
+          Quota:
+            Limit: 10000
+            Period: MONTH
+          Throttle:
+            BurstLimit: 100
+            RateLimit: 50
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization,x-api-key'"
+        AllowMethods: "'GET,POST,OPTIONS'"
+      Models:
+        # Το API Gateway δέχεται μόνο string στο `type` — union types
+        # (`[object, array]`) απορρίπτονται από τον Swagger parser του.
+        # Δεν πειράζει: το συμβόλαιο του client είναι ήδη πίνακας
+        # (relay/worker.js: `body: [{id,t,g,m,lat,lon,...}]`) και το
+        # ingest.py τον δέχεται αυτούσιο.
+        # Κέλυφος: υπάρχει μόνο για να μπορεί το GET να δείξει σε validator
+        # παραμέτρων — το σώμα του GET δεν ελέγχεται ποτέ.
+        Query:
+          $schema: 'http://json-schema.org/draft-04/schema#'
+          title: Query
+          type: object
+
+        Alert:
+          $schema: 'http://json-schema.org/draft-04/schema#'
+          title: Alert
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [lat, lon]
+            properties:
+              lat: {type: number, minimum: 34, maximum: 42}
+              lon: {type: number, minimum: 19, maximum: 30}
+              m: {type: string, maxLength: 500}
+              t: {type: number}
+              g: {type: string, maxLength: 120}
+              id: {type: string, maxLength: 120}
+              label: {type: string, maxLength: 120}
+              device: {type: string, maxLength: 200}
+              producer: {type: string, maxLength: 120}
+
+  # Επαληθεύει το JWT του OIDC provider. Δες src/authorizer/authorizer.py.
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName: !Sub 'maps-traffic-authorizer-${Environment}'
+      Handler: authorizer.handler
+      CodeUri: ../src/authorizer/
+      Environment:
+        Variables:
+          OIDC_ISSUER: !Ref OidcIssuer
+          OIDC_AUDIENCE: !Ref OidcAudience
 
   # -------------------------------------------------------------------
   # ARCHIVE PATH — EventBridge -> Firehose -> S3
@@ -378,7 +469,7 @@ Resources:
 Outputs:
   ApiEndpoint:
     Description: Το URL που αντικαθιστά το Cloudflare Worker
-    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
   RawBucketName:
     Value: !Ref RawBucket
   EventBusName:

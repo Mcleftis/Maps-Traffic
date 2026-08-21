@@ -38,6 +38,15 @@ Parameters:
     MinLength: 1
     Description: To aud claim· συνήθως το client id του Android app.
 
+  EnableMediaPath:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Ενεργοποιεί το media path (φωνητικό/φωτογραφικό alert). Κλειστό όσο
+      δεν υπάρχει client που ανεβάζει αρχεία: αλλιώς στήνονται πόροι που
+      δεν χρησιμοποιεί κανείς.
+
   EnableArchivePath:
     Type: String
     Default: 'false'
@@ -48,6 +57,7 @@ Parameters:
       αλλιώς το deploy αποτυγχάνει με SubscriptionRequiredException.
 
 Conditions:
+  MediaPathEnabled: !Equals [!Ref EnableMediaPath, 'true']
   ArchivePathEnabled: !Equals [!Ref EnableArchivePath, 'true']
 
 Globals:
@@ -466,6 +476,115 @@ Resources:
                 Action: [logs:PutLogEvents]
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*'
 
+  # -------------------------------------------------------------------
+  # MEDIA PATH — ΜΕΛΛΟΝΤΙΚΗ ΔΥΝΑΤΟΤΗΤΑ (EnableMediaPath)
+  #
+  # Δεν αντικαθιστά τίποτα: είναι ένας ακόμη παραγωγός alerts που
+  # καταλήγει στην IngestFunction, ώστε validation και κανονικοποίηση να
+  # μείνουν σε ένα μόνο σημείο. Καμία υπάρχουσα Lambda δεν αλλάζει.
+  #
+  # ΠΡΟΣΟΧΗ: η φωνητική αναζήτηση προορισμού της εφαρμογής ΔΕΝ περνά από
+  # εδώ — γίνεται on-device από το Android. Εδώ έρχεται μόνο ηχογραφημένη
+  # ΑΝΑΦΟΡΑ συμβάντος.
+  # -------------------------------------------------------------------
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Condition: MediaPathEnabled
+    Properties:
+      BucketName: !Sub 'maps-traffic-media-${Environment}-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      LifecycleConfiguration:
+        Rules:
+          # Ηχητικά και φωτογραφίες δρόμου περιέχουν φωνές, πρόσωπα και
+          # πινακίδες. Το χρήσιμο είναι το κείμενο που βγαίνει από αυτά —
+          # το πρωτογενές υλικό δεν υπάρχει λόγος να μείνει.
+          - Id: DeleteRawMedia
+            Status: Enabled
+            ExpirationInDays: 7
+          - Id: CleanIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # Το S3 καλεί τη Lambda ασύγχρονα: μετά τις retries το event χάνεται
+  # οριστικά αν δεν υπάρχει DLQ — ίδιος κανόνας με το archive path.
+  MediaDlq:
+    Type: AWS::SQS::Queue
+    Condition: MediaPathEnabled
+    Properties:
+      QueueName: !Sub 'maps-traffic-media-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  MediaFunction:
+    Type: AWS::Serverless::Function
+    Condition: MediaPathEnabled
+    Properties:
+      FunctionName: !Sub 'maps-traffic-media-${Environment}'
+      Handler: media.handler
+      CodeUri: ../src/media/
+      Timeout: 30
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt MediaDlq.Arn
+      Environment:
+        Variables:
+          # Σκόπιμα !Sub και όχι !Ref MediaBucket: το !Ref σε bucket που
+          # δίνει και το S3 trigger κλείνει κύκλο εξαρτήσεων στο SAM.
+          INGEST_FUNCTION_NAME: !Sub 'maps-traffic-ingest-${Environment}'
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Sub 'maps-traffic-media-${Environment}-${AWS::AccountId}'
+        - LambdaInvokePolicy:
+            FunctionName: !Sub 'maps-traffic-ingest-${Environment}'
+        - Statement:
+            - Effect: Allow
+              Action: [rekognition:DetectLabels]
+              Resource: '*'      # το DetectLabels δεν δέχεται resource ARN
+            - Effect: Allow
+              Action:
+                - transcribe:StartTranscriptionJob
+                - transcribe:GetTranscriptionJob
+              Resource: '*'
+            # Το Transcribe γράφει το αποτέλεσμα ως ο ΚΑΛΩΝ, όχι με δικό
+            # του role: χωρίς PutObject το job αποτυγχάνει σιωπηλά.
+            - Effect: Allow
+              Action: [s3:PutObject]
+              Resource: !Sub 'arn:aws:s3:::maps-traffic-media-${Environment}-${AWS::AccountId}/transcripts/*'
+      Events:
+        AudioUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref MediaBucket
+            Events: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules: [{Name: prefix, Value: 'audio/'}]
+        ImageUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref MediaBucket
+            Events: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules: [{Name: prefix, Value: 'image/'}]
+        TranscriptReady:
+          Type: S3
+          Properties:
+            Bucket: !Ref MediaBucket
+            Events: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules: [{Name: prefix, Value: 'transcripts/'}]
+
 Outputs:
   ApiEndpoint:
     Description: Το URL που αντικαθιστά το Cloudflare Worker
@@ -474,3 +593,7 @@ Outputs:
     Value: !Ref RawBucket
   EventBusName:
     Value: !Ref TrafficBus
+  MediaBucketName:
+    Condition: MediaPathEnabled
+    Description: Ανέβασε σε audio/ ή image/ με x-amz-meta-lat & x-amz-meta-lon
+    Value: !Ref MediaBucket

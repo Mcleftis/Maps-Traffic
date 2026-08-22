@@ -15,6 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "common", "python"))
 sys.path.insert(0, os.path.join(HERE, "ingest"))
 sys.path.insert(0, os.path.join(HERE, "query"))
+sys.path.insert(0, os.path.join(HERE, "store"))
 
 
 def _stub_boto3():
@@ -45,6 +46,7 @@ import geohash                                       # noqa: E402
 from ingest import to_canonical, validate, ValidationError, _ulid   # noqa: E402
 from normalize import classify, fold                 # noqa: E402
 from query import query_nearby                       # noqa: E402
+from store import fingerprint, to_item, DEDUP_PREFIX  # noqa: E402
 
 PASSED, FAILED = [], []
 
@@ -175,6 +177,45 @@ check("geohash του sample συμφωνεί με τα coords",
       == sample["location"]["geohash5"])
 check("provenance χωρίς άγνωστα πεδία",
       set(sample["provenance"]) <= set(schema["properties"]["provenance"]["properties"]))
+
+# ------------------------------------------------- αποδιπλασιασμός (store)
+print("\n--- αποδιπλασιασμός ---")
+
+
+def _event(**overrides):
+    """Canonical event βασισμένο στο sample, με στοχευμένες αλλαγές."""
+    import copy
+    event = copy.deepcopy(sample)
+    for key, value in overrides.items():
+        if key in ("text", "type"):
+            event["alert"][key] = value
+        elif key in ("geohash5", "geohash7"):
+            event["location"][key] = value
+        else:
+            event[key] = value
+    return event
+
+
+# Το κρίσιμο: δύο κινητά που διαβάζουν το ΙΔΙΟ μήνυμα Viber παράγουν
+# διαφορετικό eventId (το _ulid είναι τυχαίο), αλλά ίδιο περιεχόμενο.
+check("ίδιο περιεχόμενο με άλλο eventId -> ίδιο αποτύπωμα",
+      fingerprint(sample) == fingerprint(_event(eventId=_ulid())))
+check("άλλο κείμενο -> άλλο αποτύπωμα",
+      fingerprint(sample) != fingerprint(_event(text="Κάτι εντελώς άλλο")))
+check("άλλος τύπος -> άλλο αποτύπωμα",
+      fingerprint(sample) != fingerprint(_event(type="POLICE")))
+check("άλλη θέση -> άλλο αποτύπωμα",
+      fingerprint(sample) != fingerprint(_event(geohash7="sx0r4n8")))
+check("το αποτύπωμα είναι σταθερό",
+      fingerprint(sample) == fingerprint(sample))
+# Το '#' δεν υπάρχει στο αλφάβητο του geohash, άρα ένα marker δεν μπορεί
+# να συγκρουστεί με πραγματικό κελί ούτε να επιστραφεί από το query.
+check("το πρόθεμα marker δεν είναι έγκυρο geohash",
+      "#" in DEDUP_PREFIX
+      and not re.fullmatch(r"[0-9b-hjkmnp-z]+", DEDUP_PREFIX))
+check("το to_item κρατά το κλειδί που περιμένει το query",
+      to_item(sample)["geohash5"] == sample["location"]["geohash5"]
+      and to_item(sample)["sortKey"].endswith(sample["eventId"]))
 
 # ------------------------------------------------------------------ σύνοψη
 print(f"\n{'=' * 58}")
